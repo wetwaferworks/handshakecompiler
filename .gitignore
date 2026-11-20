@@ -1,1 +1,6 @@
 /build/
+# push prep (REVIEW.md)
+*.o
+*.tmp
+hc.*/
+tests/fuzz/out/
