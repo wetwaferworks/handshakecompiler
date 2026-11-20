@@ -63,7 +63,7 @@ static inline uint64_t hc_load_acq_u64(const volatile uint64_t *p)
     __asm__ volatile("ldar %0, [%1]" : "=r"(v) : "r"(p) : "memory");
     return v;
 #else
-    return atomic_load_explicit((const _Atomic uint64_t *)p, memory_order_acquire);
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
 #endif
 }
 
@@ -74,7 +74,7 @@ static inline uint32_t hc_load_acq_u32(const volatile uint32_t *p)
     __asm__ volatile("ldar %w0, [%1]" : "=r"(v) : "r"(p) : "memory");
     return v;
 #else
-    return atomic_load_explicit((const _Atomic uint32_t *)p, memory_order_acquire);
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
 #endif
 }
 
@@ -83,7 +83,7 @@ static inline void hc_store_rel_u64(volatile uint64_t *p, uint64_t v)
 #if defined(__aarch64__)
     __asm__ volatile("stlr %0, [%1]" :: "r"(v), "r"(p) : "memory");
 #else
-    atomic_store_explicit((_Atomic uint64_t *)p, v, memory_order_release);
+    __atomic_store_n(p, v, __ATOMIC_RELEASE);
 #endif
 }
 
@@ -92,7 +92,7 @@ static inline void hc_store_rel_u32(volatile uint32_t *p, uint32_t v)
 #if defined(__aarch64__)
     __asm__ volatile("stlr %w0, [%1]" :: "r"(v), "r"(p) : "memory");
 #else
-    atomic_store_explicit((_Atomic uint32_t *)p, v, memory_order_release);
+    __atomic_store_n(p, v, __ATOMIC_RELEASE);
 #endif
 }
 
@@ -134,15 +134,24 @@ static inline void hc_event_wake(void)
 }
 
 /*
- * Bounded wait: do up to n event/yield iterations, then return the observed
- * word to the caller (which decides whether to futex-sleep). Bounded by n, so
- * it is NOT a spinlock — there is no unbounded busy-wait.
+ * Bounded wait: wait for *word to differ from `expected`, up to `max_spins`
+ * event/yield iterations, then return the observed word to the caller (which
+ * decides whether to futex-sleep). The value is checked BEFORE each wait and
+ * the loop breaks immediately once it differs, so a wakeup that already landed
+ * is never missed. hc_event_prime() arms the ARM64 event register before the
+ * loop so the first wfe cannot stall past an earlier sev. Bounded by
+ * max_spins, so it is NOT a spinlock — there is no unbounded busy-wait.
  */
-static inline uint32_t hc_bounded_wait_u32(const volatile uint32_t *word, uint32_t n)
+static inline uint32_t hc_bounded_wait_u32(const volatile uint32_t *word,
+                                           uint32_t expected, uint32_t max_spins)
 {
     uint32_t i;
     uint32_t v = hc_load_acq_u32(word);
-    for (i = 0; i < n; i++) {
+    hc_event_prime();
+    for (i = 0; i < max_spins; i++) {
+        if (v != expected) {
+            break;
+        }
         hc_event_wait();
         v = hc_load_acq_u32(word);
     }
@@ -150,8 +159,12 @@ static inline uint32_t hc_bounded_wait_u32(const volatile uint32_t *word, uint32
 }
 
 /* --------------------------------------------------------------------------
- * Cycle counter (telemetry ONLY — never fold into a ledger: HC-E021)
+ * Cycle counter (telemetry ONLY — never fold into a ledger: HC-E021).
+ * Gated behind HC_RUNTIME_TELEMETRY so component code cannot reach it; HC also
+ * rejects direct hc_cycle_counter/hc_cycle_freq calls under HC-E021 in the
+ * component profile.
  * -------------------------------------------------------------------------- */
+#if defined(HC_RUNTIME_TELEMETRY)
 static inline uint64_t hc_cycle_counter(void)
 {
 #if defined(__aarch64__)
@@ -177,6 +190,7 @@ static inline uint64_t hc_cycle_freq(void)
     return 0;
 #endif
 }
+#endif /* HC_RUNTIME_TELEMETRY */
 
 /* --------------------------------------------------------------------------
  * Deterministic FNV-1a 64-bit, bit-identical to HandshakeOS hs_fnv1a64().

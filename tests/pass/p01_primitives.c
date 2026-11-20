@@ -3,6 +3,7 @@
  * HandshakeOS hs_fnv1a64 (offset 0xcbf29ce484222325, prime 0x100000001b3). */
 #include <stdio.h>
 #include <stdint.h>
+#define HC_RUNTIME_TELEMETRY 1
 #include "hc_rt.h"
 
 /* local re-implementation of HandshakeOS hs_fnv1a64 for parity comparison */
@@ -45,7 +46,7 @@ int main(void)
     /* fences + wait/event primitives are callable (no crash) */
     hc_fence_publish(); hc_fence_pull(); hc_fence_barrier();
     hc_cpu_relax(); hc_event_prime(); hc_event_wake();
-    uint32_t bw = hc_bounded_wait_u32(&w32, 2);
+    uint32_t bw = hc_bounded_wait_u32(&w32, 0u, 2u); /* expected=0 (already 0x12345678 -> early exit) */
     printf("fences/wait  dmb/sev/wfe/bounded-wait callable (bw=%08x)\n", (unsigned)bw);
 
     /* cycle counter callable (may be 0 under emulation) */

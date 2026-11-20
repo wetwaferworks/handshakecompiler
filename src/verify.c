@@ -191,7 +191,8 @@ static void check_idents(ctx *c, hc_func *f)
             { emit(c,20,i,"wall-clock/monotonic time in component payload"); continue; }
         /* E021 cycle counter builtins */
         if (ieq(s,"__rdtsc")||ieq(s,"__builtin_ia32_rdtsc")||ieq(s,"__builtin_ia32_rdtscp")||
-            ieq(s,"__builtin_readcyclecounter")||ieq(s,"rdtscp")||ieq(s,"rdtsc"))
+            ieq(s,"__builtin_readcyclecounter")||ieq(s,"rdtscp")||ieq(s,"rdtsc")||
+            ((ieq(s,"hc_cycle_counter")||ieq(s,"hc_cycle_freq")) && !runtime))
             { emit(c,21,i,"hardware cycle counter in deterministic code"); continue; }
         /* E022 rng */
         if (ieq(s,"rand")||ieq(s,"srand")||ieq(s,"random")||ieq(s,"srandom")||ieq(s,"drand48")||

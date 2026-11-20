@@ -27,14 +27,14 @@ static int cc_compile(const char *cc, const char *src, const char *out,
     int status;
 
     argv = (char **)calloc(cap, sizeof(char *));
+    if (argv == NULL) { fprintf(stderr, "hc: out of memory building backend argv\n"); return -1; }
     argv[n++] = (char *)cc;
     argv[n++] = (char *)"-std=c11";
     argv[n++] = (char *)"-Wall";
     argv[n++] = (char *)"-Wextra";
-    argv[n++] = (char *)"-Wno-unused-function";
-    argv[n++] = (char *)"-Wno-unused-variable";
-    argv[n++] = (char *)"-Wno-unused-parameter";
-    argv[n++] = (char *)"-Wno-unused-but-set-variable";
+    /* No -Wno-unused-* suppressions: Herominde's valid controls and the lowered
+     * .hc stubs are warning-clean under -Wall -Wextra, and user -Werror (if
+     * passed via passthru) must surface real warnings, never be masked. */
     for (i = 0; i < npass; i++) argv[n++] = passthru[i];
     argv[n++] = (char *)"-c";
     argv[n++] = (char *)src;
