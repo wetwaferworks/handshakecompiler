@@ -1,9 +1,12 @@
 /* SPDX-License-Identifier: MIT */
 /*
  * lower.c — translate the dedicated .hc phase-keyword syntax into annotated
- * C11 that shares HC's HS_* contract and the hc_rt.h runtime. Deterministic,
- * zero runtime overhead; phase keywords become HS_PHASE_* annotations so the
- * same verifier runs over .c and .hc uniformly.
+ * C11. Fully length-bounded and string/comment/char-literal aware: keywords are
+ * only rewritten in real code, never inside "..." / '...' / // / slash-star
+ * comments, and the scanner never reads past the slurped buffer even on an
+ * unterminated brace/comment/string (crash02 / F11). HS_BOUNDED(n) is preserved
+ * (F19). hc_contract.h is included before hc_rt.h so the HS_* macros are defined
+ * once, identically (no -Wmacro-redefined). All phase functions are lowered.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,24 +15,26 @@
 
 static int is_ident(int ch) { return isalnum(ch) || ch == '_'; }
 
-static size_t read_word(const char *p, char *out, size_t cap)
+static size_t read_word(const char *p, const char *end, char *out, size_t cap)
 {
     size_t n = 0;
-    while (p[n] && is_ident((unsigned char)p[n]) && n < cap - 1) { out[n] = p[n]; n++; }
+    while (p + n < end && is_ident((unsigned char)p[n]) && n < cap - 1) { out[n] = p[n]; n++; }
     out[n] = '\0';
     return n;
 }
 
-/* copy balanced {...} starting at p[0]=='{'; returns consumed length */
-static size_t copy_block(const char *p, char *out, size_t cap)
+/* copy a balanced {...} starting at p[0]=='{'; bounded by end. Returns consumed. */
+static size_t copy_block(const char *p, const char *end, char *out, size_t cap)
 {
     size_t i = 0, o = 0; int d = 0;
-    do {
-        if (p[i] == '{') d++;
-        else if (p[i] == '}') d--;
-        if (o < cap - 1) out[o++] = p[i];
+    while (p + i < end) {
+        char ch = p[i];
+        if (ch == '{') d++;
+        else if (ch == '}') d--;
+        if (o < cap - 1) out[o++] = ch;
         i++;
-    } while (p[i - 1] && d > 0);
+        if (d == 0) break;
+    }
     out[o] = '\0';
     return i;
 }
@@ -44,52 +49,109 @@ static void trim(char *s)
 
 int hc_lower_hc(const char *src, FILE *out)
 {
+    size_t len = strlen(src);
     const char *p = src;
+    const char *end = src + len;
+
     fputs("/* lowered from .hc by HC */\n", out);
     fputs("#include <stdint.h>\n#include <stdbool.h>\n#include <stddef.h>\n", out);
-    fputs("#include \"hc_rt.h\"\n#include \"hc_contract.h\"\n", out);
+    fputs("#include \"hc_contract.h\"\n#include \"hc_rt.h\"\n", out);
 
-    while (*p) {
-        if (is_ident((unsigned char)*p) &&
-            (p == src || !is_ident((unsigned char)p[-1]))) {
+    while (p < end) {
+        char c = *p;
+
+        /* line comment */
+        if (c == '/' && p + 1 < end && p[1] == '/') {
+            while (p < end && *p != '\n') { fputc(*p, out); p++; }
+            continue;
+        }
+        /* block comment */
+        if (c == '/' && p + 1 < end && p[1] == '*') {
+            fputc('/', out); fputc('*', out); p += 2;
+            while (p < end && !(*p == '*' && p + 1 < end && p[1] == '/')) { fputc(*p, out); p++; }
+            if (p < end) { fputc('*', out); if (p + 1 < end) fputc('/', out); p += 2; }
+            continue;
+        }
+        /* string literal */
+        if (c == '"') {
+            fputc('"', out); p++;
+            while (p < end && *p != '"') {
+                if (*p == '\\' && p + 1 < end) { fputc(p[0], out); fputc(p[1], out); p += 2; }
+                else { fputc(*p, out); p++; }
+            }
+            if (p < end) { fputc('"', out); p++; }
+            continue;
+        }
+        /* char literal */
+        if (c == '\'') {
+            fputc('\'', out); p++;
+            while (p < end && *p != '\'') {
+                if (*p == '\\' && p + 1 < end) { fputc(p[0], out); fputc(p[1], out); p += 2; }
+                else { fputc(*p, out); p++; }
+            }
+            if (p < end) { fputc('\'', out); p++; }
+            continue;
+        }
+
+        if (is_ident((unsigned char)c) && (p == src || !is_ident((unsigned char)p[-1]))) {
             char w[128];
-            size_t wl = read_word(p, w, sizeof(w));
+            size_t wl = read_word(p, end, w, sizeof(w));
 
             if (!strcmp(w, "readonly") || !strcmp(w, "shard_private")) {
                 const char *q = p + wl;
-                while (*q && isspace((unsigned char)*q)) q++;
-                char kw[32]; size_t kl = read_word(q, kw, sizeof(kw));
+                while (q < end && isspace((unsigned char)*q)) q++;
+                char kw[32]; size_t kl = read_word(q, end, kw, sizeof(kw));
                 if (!strcmp(kw, "struct")) {
                     q += kl;
-                    while (*q && isspace((unsigned char)*q)) q++;
-                    char nm[128]; size_t nl = read_word(q, nm, sizeof(nm));
+                    while (q < end && isspace((unsigned char)*q)) q++;
+                    char nm[128]; size_t nl = read_word(q, end, nm, sizeof(nm));
                     q += nl;
-                    while (*q && isspace((unsigned char)*q)) q++;
-                    if (*q == '{') {
-                        char blk[4096];
-                        size_t bl = copy_block(q, blk, sizeof(blk));
-                        q += bl;
-                        while (*q && isspace((unsigned char)*q)) q++;
-                        if (*q == ';') q++;
-                        fprintf(out, "typedef struct %s %s %s;", nm, blk, nm);
-                        p = q;
+                    while (q < end && isspace((unsigned char)*q)) q++;
+                    if (q < end && *q == '{') {
+                        char blk[8192];
+                        size_t bl = copy_block(q, end, blk, sizeof(blk));
+                        /* only a well-formed (balanced) block is lowered */
+                        if (bl > 0 && blk[strlen(blk) ? strlen(blk) - 1 : 0] == '}') {
+                            q += bl;
+                            while (q < end && isspace((unsigned char)*q)) q++;
+                            if (q < end && *q == ';') q++;
+                            fprintf(out, "typedef struct %s %s %s;", nm, blk, nm);
+                            p = q;
+                            continue;
+                        }
+                        /* truncated/unbalanced: emit literally and stop safely */
+                        fwrite(p, 1, (size_t)(end - p), out);
+                        p = end;
                         continue;
                     }
                 }
-                /* fall through: emit the word literally */
                 fwrite(p, 1, wl, out); p += wl; continue;
             }
             if (!strcmp(w, "shared")) { fputs("HS_SHARED ", out); p += wl; continue; }
             if (!strcmp(w, "bounded")) {
                 const char *q = p + wl;
-                while (*q && isspace((unsigned char)*q)) q++;
-                if (*q == '(') { int d = 0; do { if (*q=='(') d++; else if (*q==')') d--; q++; } while (*q && d>0); }
-                p = q; continue;
+                while (q < end && isspace((unsigned char)*q)) q++;
+                if (q < end && *q == '(') {
+                    char inner[64]; size_t io = 0; int d = 0;
+                    const char *r = q;
+                    while (r < end) {
+                        if (*r == '(') d++;
+                        else if (*r == ')') { d--; }
+                        else if (io < sizeof(inner) - 1) inner[io++] = *r;
+                        r++;
+                        if (d == 0) break;
+                    }
+                    inner[io] = '\0';
+                    trim(inner);
+                    fprintf(out, "HS_BOUNDED(%s) ", inner);   /* preserve the bound (F19) */
+                    p = r; continue;
+                }
+                fwrite(p, 1, wl, out); p += wl; continue;
             }
             if (!strcmp(w, "phase")) {
                 const char *q = p + wl;
-                while (*q && isspace((unsigned char)*q)) q++;
-                char ph[32]; size_t pl = read_word(q, ph, sizeof(ph));
+                while (q < end && isspace((unsigned char)*q)) q++;
+                char ph[32]; size_t pl = read_word(q, end, ph, sizeof(ph));
                 const char *ann = NULL;
                 if (!strcmp(ph,"publish")) ann = "HS_PHASE_PUBLISH";
                 else if (!strcmp(ph,"pull")) ann = "HS_PHASE_PULL";
@@ -98,13 +160,12 @@ int hc_lower_hc(const char *src, FILE *out)
                 else if (!strcmp(ph,"idle")) ann = "HS_PHASE_IDLE";
                 if (ann) {
                     q += pl;
-                    while (*q && isspace((unsigned char)*q)) q++;
+                    while (q < end && isspace((unsigned char)*q)) q++;
                     int pure = 0;
-                    char maybe[32]; size_t ml = read_word(q, maybe, sizeof(maybe));
-                    if (!strcmp(maybe, "pure")) { pure = 1; q += ml; while (*q && isspace((unsigned char)*q)) q++; }
-                    /* capture signature up to matching '{' at paren depth 0 */
+                    char maybe[32]; size_t ml = read_word(q, end, maybe, sizeof(maybe));
+                    if (!strcmp(maybe, "pure")) { pure = 1; q += ml; while (q < end && isspace((unsigned char)*q)) q++; }
                     char sig[2048]; size_t so = 0; int d = 0;
-                    while (*q && !(*q == '{' && d == 0)) {
+                    while (q < end && !(*q == '{' && d == 0)) {
                         if (*q == '(') d++;
                         else if (*q == ')') d--;
                         if (so < sizeof(sig) - 1) sig[so++] = *q;
@@ -115,6 +176,7 @@ int hc_lower_hc(const char *src, FILE *out)
                     char *arrow = strstr(sig, "->");
                     if (arrow) {
                         size_t hlen = (size_t)(arrow - sig);
+                        if (hlen >= sizeof(head)) hlen = sizeof(head) - 1;
                         memcpy(head, sig, hlen); head[hlen] = '\0';
                         snprintf(ret, sizeof(ret), "%s", arrow + 2);
                     } else {
@@ -123,18 +185,17 @@ int hc_lower_hc(const char *src, FILE *out)
                     }
                     trim(head); trim(ret);
                     fprintf(out, "%s %s%s %s {", ann, pure ? "HS_PURE " : "", ret, head);
-                    if (*q == '{') q++;
+                    if (q < end && *q == '{') q++;
                     p = q;
                     continue;
                 }
                 fwrite(p, 1, wl, out); p += wl; continue;
             }
-            /* ordinary identifier */
             fwrite(p, 1, wl, out);
             p += wl;
             continue;
         }
-        fputc(*p, out);
+        fputc(c, out);
         p++;
     }
     fputc('\n', out);

@@ -35,7 +35,14 @@ static int banned_always(const char *s, size_t nlen)
            nmatch(s,nlen,"lrand48")||nmatch(s,nlen,"mrand48")||nmatch(s,nlen,"getrandom")||
            nmatch(s,nlen,"gettimeofday")||nmatch(s,nlen,"__gettimeofday")||
            nmatch(s,nlen,"omp_set_lock")||nmatch(s,nlen,"omp_set_nest_lock")||
-           npfx(s,nlen,"GOMP_")||npfx(s,nlen,"__kmpc_");
+           npfx(s,nlen,"GOMP_")||npfx(s,nlen,"__kmpc_")||
+           /* F8/F9: process spawning & entropy & 16-byte lock-backed atomics */
+           nmatch(s,nlen,"system")||nmatch(s,nlen,"popen")||nmatch(s,nlen,"pclose")||
+           nmatch(s,nlen,"getentropy")||nmatch(s,nlen,"getauxval")||
+           nmatch(s,nlen,"posix_spawn")||nmatch(s,nlen,"posix_spawnp")||
+           nmatch(s,nlen,"__atomic_compare_exchange_16")||nmatch(s,nlen,"__atomic_exchange_16")||
+           nmatch(s,nlen,"__atomic_load_16")||nmatch(s,nlen,"__atomic_store_16")||
+           nmatch(s,nlen,"__atomic_fetch_add_16")||nmatch(s,nlen,"time")||nmatch(s,nlen,"ftime");
 }
 
 /* Additionally banned in COMPONENT profile (allowed only in RUNTIME). */
@@ -46,13 +53,24 @@ static int banned_component(const char *s, size_t nlen)
            nmatch(s,nlen,"thrd_join")||nmatch(s,nlen,"clone")||nmatch(s,nlen,"fork")||
            nmatch(s,nlen,"vfork")||nmatch(s,nlen,"syscall")||
            nmatch(s,nlen,"clock_gettime")||nmatch(s,nlen,"timespec_get")||
-           nmatch(s,nlen,"clock")||nmatch(s,nlen,"time")||nmatch(s,nlen,"ftime")||
+           nmatch(s,nlen,"clock")||
            nmatch(s,nlen,"sleep")||nmatch(s,nlen,"usleep")||nmatch(s,nlen,"nanosleep")||
            nmatch(s,nlen,"clock_nanosleep")||nmatch(s,nlen,"sched_yield")||
            nmatch(s,nlen,"sched_getcpu")||nmatch(s,nlen,"gettid")||
            nmatch(s,nlen,"pthread_self")||nmatch(s,nlen,"select")||nmatch(s,nlen,"pselect")||
            nmatch(s,nlen,"poll")||nmatch(s,nlen,"ppoll")||nmatch(s,nlen,"epoll_wait")||
-           nmatch(s,nlen,"epoll_pwait")||nmatch(s,nlen,"waitpid")||nmatch(s,nlen,"wait4");
+           nmatch(s,nlen,"epoll_pwait")||nmatch(s,nlen,"waitpid")||nmatch(s,nlen,"wait4")||
+           /* F8/F9: timers, non-local jumps, process identity/env, SysV semaphores */
+           nmatch(s,nlen,"thrd_sleep")||nmatch(s,nlen,"thrd_yield")||
+           nmatch(s,nlen,"clock_getres")||nmatch(s,nlen,"timer_create")||
+           nmatch(s,nlen,"timer_settime")||nmatch(s,nlen,"times")||
+           nmatch(s,nlen,"setitimer")||nmatch(s,nlen,"alarm")||
+           nmatch(s,nlen,"setjmp")||nmatch(s,nlen,"_setjmp")||nmatch(s,nlen,"__sigsetjmp")||
+           nmatch(s,nlen,"sigsetjmp")||nmatch(s,nlen,"longjmp")||nmatch(s,nlen,"siglongjmp")||
+           nmatch(s,nlen,"_longjmp")||nmatch(s,nlen,"__longjmp_chk")||
+           nmatch(s,nlen,"getpid")||nmatch(s,nlen,"getppid")||
+           nmatch(s,nlen,"semop")||nmatch(s,nlen,"semget")||nmatch(s,nlen,"semctl")||
+           nmatch(s,nlen,"semtimedop");
 }
 
 int hc_elf_audit(const char *path, hc_profile profile)
@@ -97,6 +115,8 @@ int hc_elf_audit(const char *path, hc_profile profile)
         return -1;
     }
 
+    {
+    int saw_symtab = 0;
     for (i = 0; i < e_shnum; i++) {
         const unsigned char *sh = buf + e_shoff + (uint64_t)i * e_shentsize;
         uint32_t sh_type = rd32(sh + 4);
@@ -104,6 +124,7 @@ int hc_elf_audit(const char *path, hc_profile profile)
         uint32_t sh_link;
         const unsigned char *strsh;
         if (sh_type != 2 /*SYMTAB*/ && sh_type != 11 /*DYNSYM*/) continue;
+        saw_symtab = 1;
         sh_offset = rd64(sh + 0x18);
         sh_size   = rd64(sh + 0x20);
         sh_link   = rd32(sh + 0x28);
@@ -141,6 +162,14 @@ int hc_elf_audit(const char *path, hc_profile profile)
                 offenders++;
             }
         }
+    }
+    if (!saw_symtab) {
+        /* F9: a fully-linked binary with neither .symtab nor .dynsym cannot be
+           proven lock-free (e.g. `gcc -static -s`). Fail closed. */
+        fprintf(stderr, "hc: ELF64 audit FAIL: %s has no symbol table "
+                "(stripped/static) — cannot prove zero-lock; failing closed\n", path);
+        offenders++;
+    }
     }
     free(buf);
     return offenders;

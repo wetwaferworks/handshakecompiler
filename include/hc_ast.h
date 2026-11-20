@@ -15,9 +15,10 @@ typedef enum {
 } hc_phase;
 
 typedef struct {
-    char   name[160];
+    char  *name;         /* heap-dup'd: no truncation (F16) */
     hc_phase phase;
-    int    is_pure;
+    int    is_pure;      /* HS_PURE annotated */
+    int    is_ctor;      /* __attribute__((constructor/destructor)) */
     size_t decl_start;   /* token index at start of declaration/attributes */
     size_t body_start;   /* index of '{' */
     size_t body_end;     /* index of matching '}' */
@@ -27,6 +28,8 @@ typedef struct {
     char **fnrefs;   size_t nfnrefs;
     /* const/readonly pointer param names */
     char **ro_params; size_t nro;
+    /* ALL parameter names + pointer flag (index-parallel) */
+    char **params;    int *param_ptr; size_t nparams;
     /* reachability flags (filled by analysis) */
     int reach_strict;   /* reachable from a PULL/BARRIER kernel */
     int reach_commit;   /* reachable from a COMMIT kernel */
@@ -34,10 +37,10 @@ typedef struct {
 } hc_func;
 
 typedef struct {
-    char name[160];
+    char *name;          /* heap-dup'd */
     int  is_pointer;
     int  is_const;
-    int  is_shared;     /* HS_SHARED annotated */
+    int  is_shared;      /* HS_SHARED annotated */
 } hc_var;
 
 typedef struct {

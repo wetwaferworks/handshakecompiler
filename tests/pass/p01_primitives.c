@@ -43,6 +43,23 @@ int main(void)
                 (hc_load_acq_u32(&w32) == 0x12345678u);
     printf("acq/rel  ldar/stlr round-trip %s\n", ar_ok ? "OK" : "BAD");
 
+    /* R4: the same primitives must accept _Atomic-qualified pointers too
+     * (via _Generic dispatch) and compile clean under -Werror. */
+    _Atomic uint64_t a64 = 0; _Atomic uint32_t a32 = 0;
+    hc_store_rel_u64(&a64, 0x0badf00ddeadc0deull);
+    hc_store_rel_u32(&a32, 0x9abcdef0u);
+    int at_ok = (hc_load_acq_u64(&a64) == 0x0badf00ddeadc0deull) &&
+                (hc_load_acq_u32(&a32) == 0x9abcdef0u);
+    printf("acq/rel  _Atomic round-trip %s\n", at_ok ? "OK" : "BAD");
+
+    /* R4: and plain (non-volatile, non-atomic) pointers. */
+    uint64_t pw64 = 0; uint32_t pw32 = 0;
+    hc_store_rel_u64(&pw64, 0xfeedfacecafebeefull);
+    hc_store_rel_u32(&pw32, 0x0f0f0f0fu);
+    int pl_ok = (hc_load_acq_u64(&pw64) == 0xfeedfacecafebeefull) &&
+                (hc_load_acq_u32(&pw32) == 0x0f0f0f0fu);
+    printf("acq/rel  plain-ptr round-trip %s\n", pl_ok ? "OK" : "BAD");
+
     /* fences + wait/event primitives are callable (no crash) */
     hc_fence_publish(); hc_fence_pull(); hc_fence_barrier();
     hc_cpu_relax(); hc_event_prime(); hc_event_wake();
@@ -54,7 +71,7 @@ int main(void)
     printf("cycle    counter callable (sample=%llu, freq=%llu)\n",
            (unsigned long long)c0, (unsigned long long)hc_cycle_freq());
 
-    if (!(h1 == h2 && bp_ok && ar_ok)) { printf("P01 FAIL\n"); return 1; }
+    if (!(h1 == h2 && bp_ok && ar_ok && at_ok && pl_ok)) { printf("P01 FAIL\n"); return 1; }
     printf("P01 ALL PRIMITIVE PARITY OK\n");
     return 0;
 }

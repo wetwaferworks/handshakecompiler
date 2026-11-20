@@ -7,13 +7,22 @@
 char *hc_slurp(const char *path, size_t *len);
 
 /*
- * Dual-pass support: run `cc -E -D__HC_COMPILER__=1 <incs> <defs> src > out`
- * so the preprocessed translation-unit scan sees macro-expanded tokens and
- * GNU linemarkers (system-header provenance). Returns child exit code.
+ * The ONE authoritative analysis preprocess:
+ *   cc -E -D__HC_COMPILER__=1 <flags...> src > out
+ * `flags` carries the user's -I/-D/-U/-O/-std/-m (identical macro/opt/std
+ * environment to the final codegen) so the verifier sees exactly what the
+ * backend will compile. Returns the child's exit code.
  */
 int hc_preprocess(const char *cc, const char *src,
-                  char *const *incs, size_t ninc,
-                  char *const *defs, size_t ndef,
+                  char *const *flags, size_t nflags,
                   const char *out);
+
+/*
+ * Produce a stripped C11 translation unit from a verified preprocessed `.i`:
+ * removes ONLY `__attribute__((annotate("hs:...")))` groups (token/brace-
+ * balanced, string-aware) so GCC accepts the exact verified TU via
+ * `-x cpp-output`. Returns 0 on success.
+ */
+int hc_strip_annotations(const char *inpath, const char *outpath);
 
 #endif /* HC_PREPROC_H */

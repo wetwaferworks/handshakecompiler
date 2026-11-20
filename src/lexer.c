@@ -60,17 +60,6 @@ static char *intern_file(char ***tab, size_t *n, size_t *cap, const char *name)
     return (*tab)[(*n)++];
 }
 
-static int is_sys_path(const char *f)
-{
-    if (f == NULL) {
-        return 0;
-    }
-    return strstr(f, "/usr/") != NULL
-        || strstr(f, "/usr/lib/gcc") != NULL
-        || strstr(f, "-linux-gnu/include") != NULL
-        || strncmp(f, "<", 1) == 0;
-}
-
 static const char *PUNCTS[] = {
     "...", "<<=", ">>=",
     "->", "++", "--", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||",
@@ -132,7 +121,7 @@ int hc_lex_preprocessed(const char *buf, size_t len, hc_token_list *out)
                             j++;
                         }
                     }
-                    system = flag3 || is_sys_path(curfile);
+                    system = flag3;   /* F10: linemarker flag 3 ONLY, never a path substring */
                 }
                 line = newline;
                 /* skip to end of line */
