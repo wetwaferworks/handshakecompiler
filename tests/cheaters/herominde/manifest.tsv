@@ -1,0 +1,47 @@
+path	expected	code	category	description
+valid/v01_pure_pull_worker.c	ACCEPT	HC-OK	valid_c11	Pure bounded HS_PHASE_PULL worker returning deterministic FNV-1a note
+valid/v02_canonical_commit_fold.c	ACCEPT	HC-OK	valid_c11	Canonical HS_PHASE_COMMIT folding shard results strictly in component-id order
+valid/v03_seeded_deterministic_prng.c	ACCEPT	HC-OK	valid_c11	Explicitly seeded pure xorshift64* PRNG derived only from phase/cycle/seed
+valid/v04_double_buffer_publish_commit.c	ACCEPT	HC-OK	valid_c11	Clean 3+1 publish/pull/commit double-buffer swap with zero locks
+valid/v05_disjoint_shard_buffers.c	ACCEPT	HC-OK	valid_c11	Disjoint per-shard buffers with restrict pointers and bounded transform
+valid/v06_spsc_bounded_ring.c	ACCEPT	HC-OK	valid_c11	Wait-free single-producer single-consumer bounded ring using release/acquire (no CAS spin)
+valid/v07_canonical_event_drain.c	ACCEPT	HC-OK	valid_c11	Control-coupling event drain in (tick, seq) canonical order at HS_PHASE_COMMIT
+valid/v08_pure_helper_callgraph.c	ACCEPT	HC-OK	valid_c11	Transitive call graph of bounded HS_PURE helpers invoked cleanly from HS_PHASE_PULL
+cheaters/c01_pthread_mutex.c	REJECT	HC-E001	lock_posix	Direct pthread_mutex_lock / unlock inside HS_PHASE_PULL worker
+cheaters/c02_posix_sem_rwlock_cond.c	REJECT	HC-E001	lock_posix	POSIX semaphore + pthread_rwlock + pthread_cond smuggling
+cheaters/c03_c11_mtx_and_flock.c	REJECT	HC-E002	lock_c11_os	OS file lock (flock) and FUTEX_LOCK_PI / SYS_futex lock inside component
+cheaters/c04_atomic_flag_spinlock.c	REJECT	HC-E003	lock_atomic_spin	Hidden C11 atomic_flag_test_and_set spinlock mutex
+cheaters/c05_cas_retry_lock.c	REJECT	HC-E003	lock_atomic_spin	Hidden compare-exchange ticket/CAS spinlock disguised as atomic counter
+cheaters/c06_inline_asm_spinlock.c	REJECT	HC-E004	lock_asm	Inline assembly x86_64 lock xchg / pause or ARM64 ldaxr/stlxr spinlock bypass
+cheaters/c07_volatile_dekker_wait.c	REJECT	HC-E005	lock_volatile_wait	Non-atomic volatile Dekker/Peterson busy-wait mutual exclusion
+cheaters/c08_hidden_pthread_spawn.c	REJECT	HC-E006	lock_hidden_thread	Spawning rogue background pthread inside HS_PHASE_PULL component
+cheaters/c09_illegal_phase_skip.c	REJECT	HC-E007	phase_transition	Calling HS_PHASE_COMMIT directly from HS_PHASE_PULL (skipping BARRIER)
+cheaters/c10_shared_write_in_pull.c	REJECT	HC-E008	phase_write_pull	Direct write to HS_SHARED / file-scope mutable global inside HS_PHASE_PULL
+cheaters/c11_read_unpublished_internal.c	REJECT	HC-E009	phase_unpublished	Reading/mutating unpublished staging fields and raw hs_hs internals directly
+cheaters/c12_commit_event_from_pull.c	REJECT	HC-E010	phase_commit_leak	Worker posting control-coupling events (hs_hs_post_event) during HS_PHASE_PULL
+cheaters/c13_transitive_helper_write.c	REJECT	HC-E011	phase_call_leak	Transitive call-graph leak: HS_PHASE_PULL -> unannotated helper -> global write
+cheaters/c14_fnptr_phase_escape.c	REJECT	HC-E011	phase_call_leak	Indirect function-pointer dispatch from HS_PHASE_PULL into HS_PHASE_COMMIT mutator
+cheaters/c15_pointer_escape_global.c	REJECT	HC-E012	phase_ptr_escape	Escaping phase-scoped / stack / shard-private pointer into static global
+cheaters/c16_const_cast_snapshot.c	REJECT	HC-E013	alias_const_cast	Casting away const on published HS_READONLY snapshot to mutate shared phase input
+cheaters/c17_union_punning_const_bypass.c	REJECT	HC-E014	alias_union_pun	Union type-punning & uintptr_t integer round-trip bypassing const immutability
+cheaters/c18_cross_shard_write_overlap.c	REJECT	HC-E015	alias_shard_overlap	Worker writing into sibling shard slot (out[shard_id ^ 1]) breaking shard disjointness
+cheaters/c19_unbounded_loop_and_goto.c	REJECT	HC-E016	liveness_loop	Unbounded while(1) / backward goto starvation loop in HS_PHASE_PULL
+cheaters/c20_direct_and_mutual_recursion.c	REJECT	HC-E017	liveness_recursion	Mutual recursion cycle (ping -> pong -> ping) reachable from HS_PHASE_PULL
+cheaters/c21_blocking_sleep_io.c	REJECT	HC-E018	liveness_blocking	Blocking usleep / nanosleep / sched_yield stalling barrier toward watchdog FREEZE
+cheaters/c22_watchdog_tamper.c	REJECT	HC-E019	watchdog_tamper	Tampering with watchdog ceiling_ns and clearing hs->frozen flag directly
+cheaters/c23_wall_clock_in_worker.c	REJECT	HC-E020	det_wall_clock	Wall-clock time() / gettimeofday() / clock_gettime() folded into worker note
+cheaters/c24_raw_cycle_counter.c	REJECT	HC-E021	det_cycle_counter	Raw hardware cycle counter (x86 rdtsc / ARM64 cntvct_el0) leaking into output
+cheaters/c25_ambient_rng.c	REJECT	HC-E022	det_ambient_rng	Ambient entropy (rand/srand/getrandom) breaking deterministic replay
+cheaters/c26_pointer_address_and_tid_hash.c	REJECT	HC-E023	det_order_leak	Hashing raw pointer address (ASLR leak) and pthread_self() into ledger note
+cheaters/c27_arrival_order_ledger_fold.c	REJECT	HC-E023	det_order_leak	Folding worker results in thread arrival order via atomic_fetch_add instead of component-id order
+cheaters/c28_dlsym_split_hex_smuggle.c	REJECT	HC-E024	smuggle_dlopen	dlopen/dlsym smuggling pthread_mutex_lock via split strings + hex escapes
+cheaters/c29_macro_token_paste_smuggle.c	REJECT	HC-E025	smuggle_macro	Preprocessor ## token-pasting hiding pthread_mutex_lock and #pragma suppression
+cheaters/c30_asm_symbol_redirect_smuggle.c	REJECT	HC-E026	smuggle_linker	GCC __asm__ symbol redirection aliasing innocent name to pthread_mutex_lock
+valid_hc/vh01_clean_cycle.hc	ACCEPT	HC-OK	valid_hc	Valid .hc file with explicit publish -> pull -> barrier -> commit phase blocks
+valid_hc/vh02_seeded_event_drain.hc	ACCEPT	HC-OK	valid_hc	Valid .hc pure seeded kernel + canonical (tick, seq) commit fold
+cheaters_hc/ch01_mutex_in_pull_block.hc	REJECT	HC-E001	hc_lock_posix	.hc phase pull block smuggling pthread_mutex_lock
+cheaters_hc/ch02_shared_write_in_pull_block.hc	REJECT	HC-E008	hc_phase_write_pull	.hc phase pull block directly mutating shared state variable
+cheaters_hc/ch03_pull_calls_commit_block.hc	REJECT	HC-E007	hc_phase_transition	.hc phase pull block directly invoking phase commit function (skipping barrier)
+cheaters_hc/ch04_unbounded_loop_in_pull.hc	REJECT	HC-E016	hc_liveness_loop	.hc phase pull block with unbounded while(1) starvation loop
+cheaters_hc/ch05_clock_and_rng_in_commit.hc	REJECT	HC-E020	hc_det_wall_clock	.hc phase commit block folding wall clock (gettimeofday) into ledger
+cheaters_hc/ch06_const_cast_readonly_snap.hc	REJECT	HC-E013	hc_alias_const_cast	.hc phase pull block casting away readonly/const qualifier on snapshot
