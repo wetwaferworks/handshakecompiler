@@ -97,7 +97,7 @@ static inline uint64_t hc_load_acq_u64_plain(const volatile uint64_t *p)
     return __atomic_load_n(p, __ATOMIC_ACQUIRE);
 #endif
 }
-static inline uint64_t hc_load_acq_u64_atomic(const _Atomic uint64_t *p)
+static inline uint64_t hc_load_acq_u64_atomic(const volatile _Atomic uint64_t *p)
 {
     return atomic_load_explicit(p, memory_order_acquire);
 }
@@ -112,7 +112,7 @@ static inline uint32_t hc_load_acq_u32_plain(const volatile uint32_t *p)
     return __atomic_load_n(p, __ATOMIC_ACQUIRE);
 #endif
 }
-static inline uint32_t hc_load_acq_u32_atomic(const _Atomic uint32_t *p)
+static inline uint32_t hc_load_acq_u32_atomic(const volatile _Atomic uint32_t *p)
 {
     return atomic_load_explicit(p, memory_order_acquire);
 }
@@ -125,7 +125,7 @@ static inline void hc_store_rel_u64_plain(volatile uint64_t *p, uint64_t v)
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
 #endif
 }
-static inline void hc_store_rel_u64_atomic(_Atomic uint64_t *p, uint64_t v)
+static inline void hc_store_rel_u64_atomic(volatile _Atomic uint64_t *p, uint64_t v)
 {
     atomic_store_explicit(p, v, memory_order_release);
 }
@@ -138,37 +138,43 @@ static inline void hc_store_rel_u32_plain(volatile uint32_t *p, uint32_t v)
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
 #endif
 }
-static inline void hc_store_rel_u32_atomic(_Atomic uint32_t *p, uint32_t v)
+static inline void hc_store_rel_u32_atomic(volatile _Atomic uint32_t *p, uint32_t v)
 {
     atomic_store_explicit(p, v, memory_order_release);
 }
 
 /* _Generic dispatch: works for _Atomic, plain, const, volatile pointers. */
 #define hc_load_acq_u64(p) _Generic((p), \
-    _Atomic uint64_t *:        hc_load_acq_u64_atomic, \
-    const _Atomic uint64_t *:  hc_load_acq_u64_atomic, \
-    volatile uint64_t *:       hc_load_acq_u64_plain,  \
-    const volatile uint64_t *: hc_load_acq_u64_plain,  \
-    uint64_t *:                hc_load_acq_u64_plain,  \
-    const uint64_t *:          hc_load_acq_u64_plain)(p)
+    _Atomic uint64_t *:                 hc_load_acq_u64_atomic, \
+    const _Atomic uint64_t *:           hc_load_acq_u64_atomic, \
+    volatile _Atomic uint64_t *:        hc_load_acq_u64_atomic, \
+    const volatile _Atomic uint64_t *:  hc_load_acq_u64_atomic, \
+    volatile uint64_t *:                hc_load_acq_u64_plain,  \
+    const volatile uint64_t *:          hc_load_acq_u64_plain,  \
+    uint64_t *:                         hc_load_acq_u64_plain,  \
+    const uint64_t *:                   hc_load_acq_u64_plain)(p)
 
 #define hc_load_acq_u32(p) _Generic((p), \
-    _Atomic uint32_t *:        hc_load_acq_u32_atomic, \
-    const _Atomic uint32_t *:  hc_load_acq_u32_atomic, \
-    volatile uint32_t *:       hc_load_acq_u32_plain,  \
-    const volatile uint32_t *: hc_load_acq_u32_plain,  \
-    uint32_t *:                hc_load_acq_u32_plain,  \
-    const uint32_t *:          hc_load_acq_u32_plain)(p)
+    _Atomic uint32_t *:                 hc_load_acq_u32_atomic, \
+    const _Atomic uint32_t *:           hc_load_acq_u32_atomic, \
+    volatile _Atomic uint32_t *:        hc_load_acq_u32_atomic, \
+    const volatile _Atomic uint32_t *:  hc_load_acq_u32_atomic, \
+    volatile uint32_t *:                hc_load_acq_u32_plain,  \
+    const volatile uint32_t *:          hc_load_acq_u32_plain,  \
+    uint32_t *:                         hc_load_acq_u32_plain,  \
+    const uint32_t *:                   hc_load_acq_u32_plain)(p)
 
 #define hc_store_rel_u64(p, v) _Generic((p), \
-    _Atomic uint64_t *:  hc_store_rel_u64_atomic, \
-    volatile uint64_t *: hc_store_rel_u64_plain,  \
-    uint64_t *:          hc_store_rel_u64_plain)((p), (v))
+    _Atomic uint64_t *:           hc_store_rel_u64_atomic, \
+    volatile _Atomic uint64_t *:  hc_store_rel_u64_atomic, \
+    volatile uint64_t *:          hc_store_rel_u64_plain,  \
+    uint64_t *:                   hc_store_rel_u64_plain)((p), (v))
 
 #define hc_store_rel_u32(p, v) _Generic((p), \
-    _Atomic uint32_t *:  hc_store_rel_u32_atomic, \
-    volatile uint32_t *: hc_store_rel_u32_plain,  \
-    uint32_t *:          hc_store_rel_u32_plain)((p), (v))
+    _Atomic uint32_t *:           hc_store_rel_u32_atomic, \
+    volatile _Atomic uint32_t *:  hc_store_rel_u32_atomic, \
+    volatile uint32_t *:          hc_store_rel_u32_plain,  \
+    uint32_t *:                   hc_store_rel_u32_plain)((p), (v))
 
 /* --------------------------------------------------------------------------
  * Wait / relax primitives (signaling only; never used to build a lock)
@@ -221,8 +227,8 @@ static inline void hc_event_wake(void)
  * already landed is never missed. CLREX clears the monitor on every exit path.
  * See the EVTSTREAM DEPENDENCY note at the top of this header.
  */
-static inline uint32_t hc_bounded_wait_u32(const volatile uint32_t *word,
-                                           uint32_t expected, uint32_t max_spins)
+static inline uint32_t hc_bounded_wait_u32_impl(const volatile uint32_t *word,
+                                                uint32_t expected, uint32_t max_spins)
 {
 #if defined(__aarch64__)
     uint32_t i, v;
@@ -255,6 +261,22 @@ static inline uint32_t hc_bounded_wait_u32(const volatile uint32_t *word,
 #endif
 }
 
+/* _Generic dispatch mirroring hc_load_acq_u32: accept every qualifier spelling
+ * of a 32-bit futex word — including HandshakeOS's `_Atomic uint32_t` words —
+ * so callers compile cleanly under GCC 14 -std=c11 -Wall -Wextra -Werror with no
+ * cast at the call site. The pointer is cast to `const volatile uint32_t *` for
+ * the single implementation (acquire-load / LDAXR semantics are identical). */
+#define hc_bounded_wait_u32(word, expected, max_spins) _Generic((word), \
+    _Atomic uint32_t *:                 hc_bounded_wait_u32_impl, \
+    const _Atomic uint32_t *:           hc_bounded_wait_u32_impl, \
+    volatile _Atomic uint32_t *:        hc_bounded_wait_u32_impl, \
+    const volatile _Atomic uint32_t *:  hc_bounded_wait_u32_impl, \
+    volatile uint32_t *:                hc_bounded_wait_u32_impl, \
+    const volatile uint32_t *:          hc_bounded_wait_u32_impl, \
+    uint32_t *:                         hc_bounded_wait_u32_impl, \
+    const uint32_t *:                   hc_bounded_wait_u32_impl)( \
+        (const volatile uint32_t *)(word), (expected), (max_spins))
+
 /* --------------------------------------------------------------------------
  * Cycle counter (telemetry ONLY — never fold into a ledger: HC-E021).
  * Gated behind HC_RUNTIME_TELEMETRY so component code cannot reach it; HC also
@@ -278,6 +300,10 @@ static inline uint64_t hc_cycle_counter(void)
 #endif
 }
 
+/* Counter frequency in Hz. ARM64 returns CNTFRQ_EL0. On x86_64 and every other
+ * non-ARM64 platform there is no architectural frequency register, so this
+ * returns 0 — callers MUST check `freq != 0` before dividing by it (a cycle
+ * count cannot be converted to wall-time on those targets). */
 static inline uint64_t hc_cycle_freq(void)
 {
 #if defined(__aarch64__)
@@ -292,6 +318,11 @@ static inline uint64_t hc_cycle_freq(void)
 
 /* --------------------------------------------------------------------------
  * Deterministic FNV-1a 64-bit, bit-identical to HandshakeOS hs_fnv1a64().
+ * If `hash == 0` it is seeded with the FNV-1a64 offset basis
+ * 0xcbf29ce484222325ull (matching HandshakeOS hs_fnv1a64()), so passing 0 starts
+ * a fresh digest; pass a prior return value to continue an existing one. (A
+ * running hash that genuinely reaches 0 mid-stream is re-seeded on the next
+ * call — callers folding a known-zero intermediate must account for this.)
  * -------------------------------------------------------------------------- */
 static inline uint64_t hc_fnv1a64_word(uint64_t hash, uint64_t word)
 {
@@ -311,8 +342,14 @@ static inline uint64_t hc_fnv1a64_word(uint64_t hash, uint64_t word)
 
 /* --------------------------------------------------------------------------
  * Deterministic 4x32-bit lane bit-pack (R5). Reads ALL four lanes into locals
- * before writing either output word, so it is correct even if `out` aliases
- * `lanes`. 100% bit-exact little-endian; no spurious memory barrier.
+ * before writing either output word, so it is correct even for a same-type
+ * overlap where `out` and `lanes` name the same storage. 100% bit-exact
+ * little-endian; no spurious memory barrier.
+ *
+ * NOTE: the local-copy only defends against same-type overlap. A caller whose
+ * `uint32_t lanes[4]` and `uint64_t out[2]` overlap in memory still violates C
+ * strict aliasing (distinct types) — use genuinely distinct arrays, or stage
+ * through memcpy, if the two buffers must share storage.
  * -------------------------------------------------------------------------- */
 static inline void hc_bitpack_u32x4(const uint32_t lanes[4], uint64_t out[2])
 {

@@ -39,7 +39,12 @@ typedef struct {
 typedef struct {
     char *name;          /* heap-dup'd */
     int  is_pointer;
-    int  is_const;
+    int  is_const;         /* any 'const' present in the declaration */
+    int  is_const_pointee; /* const qualifies the pointee/object (const before '*',
+                              or a const object with no '*'); distinguishes
+                              `const T *p` / `const T arr[]` (read-only pointee)
+                              from `T * const p` (const pointer, MUTABLE pointee) */
+    int  is_array;       /* declared with [] (decays to a writable pointer) */
     int  is_shared;      /* HS_SHARED annotated */
 } hc_var;
 

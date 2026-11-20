@@ -15,10 +15,11 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
+#include <signal.h>
 
 int hc_lower_hc(const char *src, FILE *out);
 
-#define HC_VERSION "0.1.1"
+#define HC_VERSION "0.1.2"
 #define MAXARG 512
 
 static int ends_with(const char *s, const char *suf)
@@ -70,6 +71,40 @@ static void resolve_root(char *root, size_t cap)
     snprintf(root, cap, "%s", "/workspace/hc");   /* fallback */
 }
 
+/* --------------------------------------------------------------------------
+ * Signal-safe temp-dir cleanup. mkdtemp() creates a private /tmp/hc.XXXXXX dir
+ * with up to three temp files; if hc is killed mid-compile we must not leak it.
+ * The absolute paths are precomputed into static buffers (snprintf is NOT async-
+ * signal-safe, so the handler only calls unlink()/rmdir(), which are). The
+ * handler restores the default disposition and re-raises so the exit status
+ * still reflects the signal. -------------------------------------------------- */
+static char g_sig_tmpdir[PATH_MAX];
+static char g_sig_lowered[PATH_MAX + 32];
+static char g_sig_ppi[PATH_MAX + 32];
+static char g_sig_ipp[PATH_MAX + 32];
+
+static void hc_sig_cleanup(int signo)
+{
+    if (g_sig_lowered[0]) unlink(g_sig_lowered);
+    if (g_sig_ppi[0])     unlink(g_sig_ppi);
+    if (g_sig_ipp[0])     unlink(g_sig_ipp);
+    if (g_sig_tmpdir[0])  rmdir(g_sig_tmpdir);   /* succeeds once empty */
+    signal(signo, SIG_DFL);
+    raise(signo);
+}
+
+static void hc_install_sig_cleanup(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = hc_sig_cleanup;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT,  &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP,  &sa, NULL);
+}
+
 /* Best-effort sweep of leftovers in the legacy shared scratch dir. */
 static void sweep_legacy_tmp(void)
 {
@@ -106,6 +141,12 @@ static int is_dangerous_flag(const char *a)
     if (!strncmp(a, "--param", 7)) return 1;
     if (!strncmp(a, "-D__HC_COMPILER__", 17)) return 1;
     if (!strncmp(a, "-U__HC_COMPILER__", 17)) return 1;
+    /* OpenMP / transactional-memory runtimes introduce hidden locks */
+    if (!strcmp(a, "-fopenmp") || !strcmp(a, "-fopenmp-simd") || !strcmp(a, "-fgnu-tm")) return 1;
+    /* pass-through to the preprocessor / assembler / linker bypasses the gate */
+    if (!strcmp(a, "-Xpreprocessor") || !strcmp(a, "-Xassembler") || !strcmp(a, "-Xlinker")) return 1;
+    if (!strncmp(a, "-Wa,", 4)) return 1;
+    if (!strncmp(a, "-Wl,", 4)) return 1;
     return 0;
 }
 
@@ -126,7 +167,7 @@ int main(int argc, char **argv)
     char *pp[MAXARG];   size_t npp = 0;    /* preprocess = incs + defs + cg */
     const char *src = NULL, *out = NULL, *emitc = NULL, *auditfile = NULL;
     const char *target = NULL, *cross = NULL;
-    int checkonly = 0, noaudit = 0;
+    int checkonly = 0, noaudit = 0, want_noaudit = 0;
     hc_profile profile = HC_PROFILE_COMPONENT;
     int i, ret = 0;
     const char *cc = "gcc";
@@ -147,7 +188,7 @@ int main(int argc, char **argv)
         if (!strcmp(a, "--version")) { printf("hc %s\n", HC_VERSION); return 0; }
         if (!strcmp(a, "--dump-rules")) { hc_dump_rules(); return 0; }
         if (!strcmp(a, "--check-only")) { checkonly = 1; continue; }
-        if (!strcmp(a, "--no-audit")) { noaudit = 1; continue; }
+        if (!strcmp(a, "--no-audit")) { noaudit = 1; want_noaudit = 1; continue; }
         if (!strcmp(a, "--allow-runtime") || !strcmp(a, "--profile=runtime")) { profile = HC_PROFILE_RUNTIME; continue; }
         if (!strcmp(a, "--profile=component")) { profile = HC_PROFILE_COMPONENT; continue; }
         if (!strncmp(a, "--target=", 9)) { target = a + 9; continue; }
@@ -173,6 +214,15 @@ int main(int argc, char **argv)
     }
 
     cc = hc_backend_driver(target, cross);
+
+    /* --no-audit disables the zero-lock ELF audit, so it is only permitted for
+       the audited runtime core profile; in the default component profile it is
+       an audit-bypass and is rejected. */
+    if (want_noaudit && profile == HC_PROFILE_COMPONENT) {
+        fprintf(stderr, "hc: error [HC-E025]: --no-audit is forbidden in the component "
+                "profile (post-compile zero-lock ELF audit cannot be bypassed) (SMUGGLE_MACRO)\n");
+        return 1;
+    }
 
     if (auditfile) {
         int r = hc_elf_audit(auditfile, profile);
@@ -200,6 +250,8 @@ int main(int argc, char **argv)
         snprintf(tmpdir, sizeof(tmpdir), "%s/hc.XXXXXX", base);
         if (!mkdtemp(tmpdir)) { fprintf(stderr, "hc: cannot create temp dir\n"); return 2; }
         have_tmp = 1;
+        snprintf(g_sig_tmpdir, sizeof(g_sig_tmpdir), "%s", tmpdir);
+        hc_install_sig_cleanup();
     }
 
     size_t rawlen;
@@ -210,6 +262,7 @@ int main(int argc, char **argv)
     if (ends_with(src, ".hc")) {
         FILE *lf;
         snprintf(lowered, sizeof(lowered), "%s/lowered.c", tmpdir);
+        snprintf(g_sig_lowered, sizeof(g_sig_lowered), "%s", lowered);
         lf = fopen(lowered, "w");
         if (!lf) { fprintf(stderr, "hc: cannot create lowered file\n"); ret = 2; goto done; }
         have_lowered = 1;
@@ -229,6 +282,7 @@ int main(int argc, char **argv)
     }
 
     snprintf(ppi, sizeof(ppi), "%s/pp.i", tmpdir); have_ppi = 1;
+    snprintf(g_sig_ppi, sizeof(g_sig_ppi), "%s", ppi);
     if (hc_preprocess(cc, to_compile, pp, npp, ppi) != 0) {
         fprintf(stderr, "hc: preprocessing failed for %s\n", src); ret = 1; goto done;
     }
@@ -257,6 +311,7 @@ int main(int argc, char **argv)
 
     /* compile the EXACT verified TU: strip annotate -> gcc -x cpp-output */
     snprintf(ippath, sizeof(ippath), "%s/pp.stripped.i", tmpdir); have_ipp = 1;
+    snprintf(g_sig_ipp, sizeof(g_sig_ipp), "%s", ippath);
     if (hc_strip_annotations(ppi, ippath) != 0) {
         fprintf(stderr, "hc: failed to strip annotations from verified TU\n"); ret = 1; goto done;
     }

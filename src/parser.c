@@ -154,7 +154,12 @@ int hc_parse_unit(const hc_token_list *tl, hc_unit *u)
     memset(u, 0, sizeof(*u));
 
     while (i < tl->count && t[i].kind != HCT_EOF) {
-        if (t[i].system) { i++; continue; }
+        /* System-header tokens (GNU linemarker flag 3, e.g. <string.h>) are not
+           part of any user declaration. Advance stmt_start past them so the next
+           user decl's scan does not bleed across the header (which would pick up
+           stray const/'*' and mis-track an HS_SHARED global declared right after
+           a system #include — Cortana V2/b09). */
+        if (t[i].system) { i++; if (depth == 0) stmt_start = i; continue; }
 
         /* skip __attribute__((...)) / __asm__(...) groups but REMEMBER whether
          * a constructor/destructor attribute was present for the next decl. */
@@ -230,13 +235,17 @@ int hc_parse_unit(const hc_token_list *tl, hc_unit *u)
             (strcmp(t[i].text, "=") == 0 || strcmp(t[i].text, ";") == 0 ||
              strcmp(t[i].text, "[") == 0)) {
             int is_ptr = 0, is_const = 0, is_shared = 0;
+            int const_before_star = 0, seen_star = 0;
             const char *name = NULL;
             char ann[128];
             size_t k;
             int sawtype = 0;
             for (k = stmt_start; k < i; k++) {
-                if (t[k].kind == HCT_PUNCT && strcmp(t[k].text, "*") == 0) is_ptr = 1;
-                if (t[k].kind == HCT_IDENT && strcmp(t[k].text, "const") == 0) is_const = 1;
+                if (t[k].kind == HCT_PUNCT && strcmp(t[k].text, "*") == 0) { is_ptr = 1; seen_star = 1; }
+                if (t[k].kind == HCT_IDENT && strcmp(t[k].text, "const") == 0) {
+                    is_const = 1;
+                    if (!seen_star) const_before_star = 1;
+                }
                 if (t[k].kind == HCT_IDENT && annotate_at(tl, k, ann, sizeof(ann))) {
                     if (strcmp(ann, "hs:mem:shared") == 0) is_shared = 1;
                 }
@@ -252,6 +261,13 @@ int hc_parse_unit(const hc_token_list *tl, hc_unit *u)
                 v.name = strdup(name);
                 v.is_pointer = is_ptr;
                 v.is_const = is_const;
+                /* pointee is const when const qualifies it: `const T *p`
+                   (const before the '*'), or a const object with no pointer.
+                   `T * const p` (const after '*') leaves the pointee MUTABLE. */
+                v.is_const_pointee = is_ptr ? const_before_star : is_const;
+                v.is_array = (strcmp(t[i].text, "[") == 0);
+                if (!v.is_array) { size_t z; for (z = stmt_start; z < i; z++)
+                    if (t[z].kind == HCT_PUNCT && strcmp(t[z].text, "[") == 0) { v.is_array = 1; break; } }
                 v.is_shared = is_shared;
                 if (hc_find_var(u, name) == NULL) {
                     u->vars = (hc_var *)realloc(u->vars, (u->nvars + 1) * sizeof(hc_var));

@@ -110,7 +110,7 @@ int hc_strip_annotations(const char *inpath, const char *outpath)
                       if (strncmp(in + z, "annotate", 8) == 0) has_ann = 1;
                       if (strncmp(in + z, "hs:", 3) == 0) has_hs = 1;
                   } }
-                if (has_ann && has_hs) {
+                if (d == 0 && has_ann && has_hs) {
                     /* drop the whole __attribute__((...)) group */
                     i = k;
                     continue;

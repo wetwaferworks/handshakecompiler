@@ -115,6 +115,47 @@ int hc_elf_audit(const char *path, hc_profile profile)
         return -1;
     }
 
+    /* COMPONENT: reject static initializer / constructor arrays. A top-level
+       asm or __attribute__((constructor)) can smuggle a hidden init routine
+       (w03/w20/w21: rdtsc / cntvct / futex in .init_array). Reject non-empty
+       SHT_INIT_ARRAY(14) / SHT_FINI_ARRAY(15) / SHT_PREINIT_ARRAY(16) or any
+       section whose name begins .init_array / .preinit_array / .fini_array /
+       .ctors / .dtors (overflow-safe e_shstrndx + section-name bounds). E006. */
+    if (profile == HC_PROFILE_COMPONENT) {
+        uint16_t e_shstrndx = rd16(buf + 0x3e);
+        uint64_t nst_off = 0, nst_size = 0;
+        int have_names = 0;
+        if (e_shstrndx != 0 && e_shstrndx < e_shnum) {
+            const unsigned char *nsh = buf + e_shoff + (uint64_t)e_shstrndx * e_shentsize;
+            uint64_t no = rd64(nsh + 0x18), ns = rd64(nsh + 0x20);
+            if (no <= sz && ns <= sz - no) { nst_off = no; nst_size = ns; have_names = 1; }
+        }
+        for (i = 0; i < e_shnum; i++) {
+            const unsigned char *sh = buf + e_shoff + (uint64_t)i * e_shentsize;
+            uint32_t sh_type = rd32(sh + 4);
+            uint32_t sh_name = rd32(sh + 0);
+            uint64_t sh_size = rd64(sh + 0x20);
+            int bad_type = (sh_size > 0 && (sh_type == 14 /*INIT_ARRAY*/ ||
+                            sh_type == 15 /*FINI_ARRAY*/ || sh_type == 16 /*PREINIT_ARRAY*/));
+            int bad_name = 0;
+            if (have_names && (uint64_t)sh_name < nst_size) {
+                const char *nm = (const char *)(buf + nst_off + sh_name);
+                size_t avail = (size_t)(nst_size - sh_name);
+                if (memchr(nm, '\0', avail) != NULL) {
+                    if (!strncmp(nm, ".init_array", 11) || !strncmp(nm, ".preinit_array", 14) ||
+                        !strncmp(nm, ".fini_array", 11) || !strncmp(nm, ".ctors", 6) ||
+                        !strncmp(nm, ".dtors", 6))
+                        bad_name = (sh_size > 0);
+                }
+            }
+            if (bad_type || bad_name) {
+                fprintf(stderr, "hc: ELF64 audit FAIL [HC-E006]: %s contains a static "
+                        "constructor/initializer-array section (hidden init routine)\n", path);
+                offenders++;
+            }
+        }
+    }
+
     {
     int saw_symtab = 0;
     for (i = 0; i < e_shnum; i++) {

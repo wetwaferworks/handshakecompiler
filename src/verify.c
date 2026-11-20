@@ -385,6 +385,76 @@ static void check_asm(ctx *c, hc_func *f)
     }
 }
 
+/* ---------- TU-wide file-scope (top-level) inline asm ----------
+   check_asm only scans inside parsed function bodies; a top-level `asm`/
+   `__asm__` block (w03/w20/w21, Cortana b04/c01/c02) injects raw machine code,
+   .init_array constructors, syscalls or cycle counters into the TU without ever
+   entering a function. Scan every user-provenance token OUTSIDE any function
+   body (and outside system headers / hc_rt.h) for statement-form asm. The
+   symbol-redirect declarator form (`extern int x __asm__("sym")`) is handled by
+   E026 and is skipped here (it is preceded by an identifier or ')'/']'). */
+static void check_toplevel_asm(ctx *c)
+{
+    int runtime = (c->profile == HC_PROFILE_RUNTIME);
+    size_t i;
+    for (i = 0; i < c->tl->count; i++) {
+        const hc_token *t = T(c,i);
+        if (t->kind != HCT_IDENT) continue;
+        if (!(ieq(t->text,"asm")||ieq(t->text,"__asm__")||ieq(t->text,"__asm"))) continue;
+        if (t->system) continue;          /* system header */
+        if (is_rt_header(t)) continue;     /* sanctioned runtime header */
+        { size_t z; int inbody=0;
+          for (z=0; z<c->u->nfuncs; z++)
+              if (i>c->u->funcs[z].body_start && i<c->u->funcs[z].body_end) { inbody=1; break; }
+          if (inbody) continue; }          /* handled by check_asm */
+        /* statement form only (file-scope asm declaration): prev token is a
+           declaration boundary. Declarator symbol-redirect is left to E026. */
+        { int stmt_form = (i==0);
+          if (!stmt_form) { const hc_token *pv=T(c,i-1); if (tok_is(pv,";")||tok_is(pv,"}")) stmt_form=1; }
+          if (!stmt_form) continue; }
+        size_t j = i + 1;
+        while (j < c->tl->count && (tok_is(T(c,j),"volatile")||ieq(T(c,j)->text,"__volatile__")||
+               ieq(T(c,j)->text,"goto"))) j++;
+        if (j >= c->tl->count || !tok_is(T(c,j),"(")) continue;
+        size_t close = match_at(c, j, "(", ")");
+        char acc[2048]; size_t ai = 0; size_t k;
+        for (k = j + 1; k < close && ai < sizeof(acc) - 1; k++) {
+            if (T(c,k)->kind == HCT_STRING) {
+                char dec[1024]; size_t dl = hc_decode_string_literal(T(c,k)->text, dec, sizeof(dec));
+                size_t m; for (m = 0; m < dl && ai < sizeof(acc)-1; m++) acc[ai++] = dec[m];
+            }
+        }
+        acc[ai] = '\0';
+        lc_strip(acc);
+        if (!runtime) {
+            emit(c,4,i,"top-level file-scope inline asm not permitted in component (route via hc_rt.h)");
+            continue;
+        }
+        /* RUNTIME: even the audited core may not emit constructors, raw opcodes,
+           syscalls, cycle counters or lock/spin primitives from top-level asm. */
+        int ctor = (strstr(acc,".init_array")||strstr(acc,".preinit_array")||strstr(acc,".fini_array")||
+                    strstr(acc,".ctors")||strstr(acc,".dtors")||strstr(acc,".section")||
+                    strstr(acc,".pushsection")||strstr(acc,".subsection"));
+        int rawop = (strstr(acc,".byte")||strstr(acc,".inst")||strstr(acc,".word")||
+                     strstr(acc,".long")||strstr(acc,".short")||strstr(acc,".quad")||
+                     strstr(acc,".hword")||strstr(acc,".2byte")||strstr(acc,".4byte")||
+                     strstr(acc,".8byte")||strstr(acc,".incbin")||strstr(acc,".ascii"));
+        int sysc = (strstr(acc,"syscall")||strstr(acc,"\n svc")||strstr(acc,"\tsvc")||strstr(acc," svc")||
+                    strstr(acc,"int $0x80")||strstr(acc,"sysenter"));
+        int cyc  = (strstr(acc,"rdtsc")||strstr(acc,"rdpmc")||strstr(acc,"cntvct")||
+                    strstr(acc,"cntpct")||strstr(acc,"pmccntr")||strstr(acc,"s3_3_c14"));
+        int lock = (strstr(acc,"xchg")||strstr(acc,"cmpxchg")||strstr(acc,"xadd")||
+                    strstr(acc,"ldaxr")||strstr(acc,"stlxr")||strstr(acc,"ldxr")||strstr(acc,"stxr")||
+                    strstr(acc,"lock")||strstr(acc,"pause")||strstr(acc,"wfe")||strstr(acc,"wfi")||
+                    strstr(acc,"sev")||strstr(acc,"yield"));
+        if (cyc)       emit(c,21,i,"top-level inline-asm cycle counter");
+        else if (ctor) emit(c,4,i,"top-level inline asm emitting a constructor/section directive");
+        else if (rawop)emit(c,4,i,"top-level inline asm raw machine-code opcode directive");
+        else if (sysc) emit(c,4,i,"top-level inline asm raw syscall");
+        else if (lock) emit(c,4,i,"top-level inline-asm lock/spin/pause primitive");
+    }
+}
+
 /* ---------- loops: E016 unbounded, E003 CAS/atomic-load spin, E005 volatile ---------- */
 static int is_vol(ctx *c, const char *name) { size_t i; for(i=0;i<c->nvols;i++) if(ieq(c->vols[i],name)) return 1; return 0; }
 static int is_volf(ctx *c, const char *name){ size_t i; for(i=0;i<c->nvolf;i++) if(ieq(c->volf[i],name)) return 1; return 0; }
@@ -406,6 +476,49 @@ static void scan_loop_range(ctx *c, hc_func *f, size_t i, size_t lo, size_t hi)
     if (cas)        emit(c,3,i,"CAS/exchange retry spinlock loop");
     else if (aload) emit(c,3,i,"atomic-load busy-wait lock loop");
     else if (vol)   emit(c,5,i,"volatile busy-wait (Dekker/Peterson) loop");
+}
+
+static int zero_literal(const hc_token *t){
+    if (t->kind!=HCT_NUMBER) return 0;
+    const char *p=t->text;
+    if (p[0]=='0' && p[1]=='x') { p+=2; while(*p=='0')p++; }
+    else { while(*p=='0')p++; }
+    while(*p=='u'||*p=='U'||*p=='l'||*p=='L') p++;
+    return *p=='\0';
+}
+/* Does token range [lo,hi) advance one of the induction vars cv[] by a
+   non-zero step (++/--, += / -= / *= ... with non-zero rhs, or V = V +/- nz)? */
+static int range_advances(ctx *c, size_t lo, size_t hi, char **cv, size_t ncv){
+    size_t k, z;
+    for (k=lo;k<hi;k++){
+        const hc_token *t=T(c,k);
+        if (t->kind!=HCT_IDENT) continue;
+        int isc=0; for(z=0;z<ncv;z++) if(ieq(cv[z],t->text)){isc=1;break;}
+        if (!isc) continue;
+        if (k+1<hi && (tok_is(T(c,k+1),"++")||tok_is(T(c,k+1),"--"))) return 1;
+        if (k>lo   && (tok_is(T(c,k-1),"++")||tok_is(T(c,k-1),"--"))) return 1;
+        if (k+1<hi && (tok_is(T(c,k+1),"+=")||tok_is(T(c,k+1),"-=")||tok_is(T(c,k+1),"*=")||
+                       tok_is(T(c,k+1),"/=")||tok_is(T(c,k+1),"<<=")||tok_is(T(c,k+1),">>=")||
+                       tok_is(T(c,k+1),"|=")||tok_is(T(c,k+1),"&=")||tok_is(T(c,k+1),"^="))){
+            size_t j=k+2; int nonzero=0, sawtok=0;
+            while (j<hi && !tok_is(T(c,j),";") && !tok_is(T(c,j),",")){
+                sawtok=1; if(!zero_literal(T(c,j))) nonzero=1; j++;
+            }
+            if (sawtok && nonzero) return 1;    /* i += 0u is NOT advancing */
+        }
+        if (k+1<hi && tok_is(T(c,k+1),"=")){
+            size_t j=k+2; int refself=0, hasop=0, nonzero=0;
+            while (j<hi && !tok_is(T(c,j),";") && !tok_is(T(c,j),",")){
+                const hc_token *rt=T(c,j);
+                if (rt->kind==HCT_IDENT && ieq(rt->text,t->text)) refself=1;
+                if (tok_is(rt,"+")||tok_is(rt,"-")) hasop=1;
+                if (!zero_literal(rt)) nonzero=1;
+                j++;
+            }
+            if (refself && hasop && nonzero) return 1;
+        }
+    }
+    return 0;
 }
 
 static void check_loops(ctx *c, hc_func *f)
@@ -447,6 +560,35 @@ static void check_loops(ctx *c, hc_func *f)
                             if (tok_is(bt,"++")||tok_is(bt,"--")||tok_is(bt,"+=")||tok_is(bt,"-=")) adv=1; }
                     }
                     if (!adv) emit(c,16,i,"for-loop with no induction advance (unbounded)");
+                }
+                /* non-empty cond AND non-empty step: the step (or body) must
+                   advance a condition induction variable by a non-zero amount,
+                   else the loop is non-advancing/infinite (w09 i+=0u, w16 j++
+                   while testing i). */
+                if (s1+1 != s2 && s2+1 != cp) {
+                    char *cv[16]; size_t ncv=0, k2;
+                    for (k2=s1+1;k2<s2 && ncv<16;k2++){
+                        const hc_token *ct=T(c,k2);
+                        if (ct->kind==HCT_IDENT && !ieq(ct->text,"true") && !ieq(ct->text,"false")){
+                            size_t z; int dup=0; for(z=0;z<ncv;z++) if(ieq(cv[z],ct->text)){dup=1;break;}
+                            if(!dup) cv[ncv++]=ct->text;
+                        }
+                    }
+                    if (ncv>0) {
+                        int adv = range_advances(c, s2+1, cp, cv, ncv);
+                        if (!adv) {
+                            size_t bo=cp+1;
+                            if (bo<f->body_end && tok_is(T(c,bo),"{")) {
+                                size_t bc=match_at(c,bo,"{","}");
+                                adv = range_advances(c, bo+1, bc, cv, ncv);
+                            } else {
+                                size_t be=bo; while(be<f->body_end && !tok_is(T(c,be),";")) be++;
+                                adv = range_advances(c, bo, be, cv, ncv);
+                            }
+                        }
+                        if (!adv)
+                            emit(c,16,i,"for-loop step never advances a condition induction variable (non-advancing/infinite)");
+                    }
                 }
                 scan_loop_range(c, f, i, i+2, s1);   /* init usually benign, but cheap */
                 scan_loop_range(c, f, i, s1, s2);    /* condition */
@@ -506,6 +648,19 @@ static int index_is_sibling(ctx *c, hc_func *f, size_t lo, size_t hi){
     }
     return 0;
 }
+/* A pointer-parameter element index/offset that is NOT the kernel's own slot:
+   either a sibling-shard transform (param-derived arithmetic) or a hard-coded
+   constant literal index (writing to a fixed sibling slot regardless of shard).
+   A loop-counter / shard-id index (bare local ident) is allowed. */
+static int index_bad(ctx *c, hc_func *f, size_t lo, size_t hi){
+    size_t k; int hasid=0, hasnum=0;
+    if (index_is_sibling(c,f,lo,hi)) return 1;
+    for(k=lo;k<hi;k++){ const hc_token *t=T(c,k);
+        if(t->kind==HCT_IDENT) hasid=1;
+        if(t->kind==HCT_NUMBER) hasnum=1; }
+    if(!hasid && hasnum) return 1;             /* e.g. all_slots[0] / (base+2) */
+    return 0;
+}
 static int is_lunion(ctx *c, const char *name){ size_t i; for(i=0;i<c->nlun;i++) if(ieq(c->lunions[i],name)) return 1; return 0; }
 
 static void check_strict_mem(ctx *c, hc_func *f)
@@ -555,30 +710,94 @@ static void check_strict_mem(ctx *c, hc_func *f)
             if (v && !v->is_const) emit(c,8,i,"address of shared/file-scope var taken in PULL/BARRIER (writable alias)");
         }
 
-        /* E015 cross-shard: WRITE to a pointer-parameter slot whose index is a
-           sibling-shard transform (param-derived arithmetic). A plain loop
-           counter or the kernel's own shard id is allowed. */
+        /* E008: capturing a writable pointer alias of a MUTABLE shared global.
+           Covers mutable global array decay (`uint64_t *p = g_table;`) and a
+           const-POINTER-to-mutable (`uint64_t *q = g_const_ptr;` where the
+           global is `T * const`). `static const` LUTs (const pointee) are NOT
+           flagged, so read-only tables stay accepted. */
+        if (t->kind==HCT_IDENT) {
+            hc_var *gv = hc_find_var(c->u, t->text);
+            if (gv && (gv->is_array || gv->is_pointer) && !gv->is_const_pointee &&
+                i>f->body_start+1 && tok_is(T(c,i-1),"=") &&
+                i+1<f->body_end && tok_is(T(c,i+1),";")) {
+                /* require the LHS of this initializer/assignment to be a pointer */
+                size_t s=i-1; int star=0;
+                while (s>f->body_start && !tok_is(T(c,s),";") &&
+                       !tok_is(T(c,s),"{") && !tok_is(T(c,s),"}")) {
+                    if (tok_is(T(c,s),"*")) star=1;
+                    s--;
+                }
+                if (star) emit(c,8,i,"writable pointer alias of mutable shared global in PULL/BARRIER");
+            }
+        }
+
+        /* E015 cross-shard: WRITE to a pointer-parameter element that is not the
+           kernel's own slot. Three syntactic forms, all gated by index_bad()
+           (sibling-shard transform OR hard-coded constant index) so a plain
+           loop counter / own-shard index stays allowed:
+             (1) subscript        all_slots[IDX].note = v
+             (2) arrow arith      (all_slots + IDX)->note = v
+             (3) deref arith      *(all_slots + IDX) = v                      */
         if (t->kind == HCT_IDENT && is_ptr_param(f, t->text) && i+1<f->body_end && tok_is(T(c,i+1),"[")) {
             size_t close = match_at(c,i+1,"[","]");
             size_t j=close+1; while(j<f->body_end){ if(tok_is(T(c,j),".")||tok_is(T(c,j),"->")){j+=2;continue;} break; }
             int iswrite = tok_is(T(c,j),"=")||tok_is(T(c,j),"+=")||tok_is(T(c,j),"^=")||tok_is(T(c,j),"|=")||tok_is(T(c,j),"-=");
-            if (iswrite && index_is_sibling(c,f,i+2,close))
-                emit(c,15,i,"cross-shard write overlap (sibling shard slot)");
+            if (iswrite && index_bad(c,f,i+2,close))
+                emit(c,15,i,"cross-shard write overlap (sibling/fixed shard slot)");
+        }
+        /* pointer-arith forms: ptr_param used inside a parenthesised +/- expr */
+        if (t->kind == HCT_IDENT && is_ptr_param(f, t->text) && i>f->body_start+1 &&
+            tok_is(T(c,i-1),"(") && i+1<f->body_end &&
+            (tok_is(T(c,i+1),"+")||tok_is(T(c,i+1),"-"))) {
+            size_t open=i-1, close=match_at(c,open,"(",")");
+            if (close<f->body_end) {
+                size_t j=close+1;
+                int arrow=0;
+                while(j<f->body_end){ if(tok_is(T(c,j),".")||tok_is(T(c,j),"->")){arrow=1;j+=2;continue;} break; }
+                int iswrite = tok_is(T(c,j),"=")||tok_is(T(c,j),"+=")||tok_is(T(c,j),"^=")||tok_is(T(c,j),"|=")||tok_is(T(c,j),"-=");
+                /* *(p + IDX) = v : outer paren preceded by a deref '*' */
+                int deref = (open>f->body_start+1 && tok_is(T(c,open-1),"*"));
+                if ((arrow || deref) && iswrite && index_bad(c,f,i+2,close))
+                    emit(c,15,i,"cross-shard write overlap via pointer arithmetic (sibling/fixed shard slot)");
+            }
         }
 
-        /* E013/E014 const launder: cast of a readonly param */
-        if (t->kind == HCT_IDENT && is_ro_param(f, t->text) && i>f->body_start+1 && tok_is(T(c,i-1),")")) {
-            int d=0; size_t k=i-1; size_t open=0;
-            for (;;){ if(tok_is(T(c,k),")"))d++; else if(tok_is(T(c,k),"(")){d--; if(d==0){open=k;break;}} if(k==f->body_start)break; k--; }
-            if (open){ int star=0,cst=0,typ=0,intty=0; size_t z;
-                for(z=open+1;z<i-1;z++){ const hc_token*zt=T(c,z);
+        /* E013/E014 const launder: a cast whose OPERAND is a readonly param used
+           as a pointer. Forward scan unwraps arbitrary parentheses, address-of,
+           deref, subscript and +/- pointer arithmetic in the operand so forms
+           like (T *)(snap + 0) and (T *)&snap[0] are caught, while an integer
+           read of a member such as (uint64_t)(snap->seed + i) is NOT. */
+        if (tok_is(t,"(")) {
+            size_t close = match_at(c,i,"(",")");
+            if (close>i && close<f->body_end) {
+                int star=0,cst=0,typ=0,intty=0; size_t z;
+                for(z=i+1;z<close;z++){ const hc_token*zt=T(c,z);
                     if(tok_is(zt,"*"))star=1;
                     if(ieq(zt->text,"const"))cst=1;
                     if(zt->kind==HCT_IDENT) typ=1;
                     if(ieq(zt->text,"uintptr_t")||ieq(zt->text,"intptr_t")||ieq(zt->text,"size_t")||
                        ieq(zt->text,"long")||ieq(zt->text,"void")) intty=1; }
-                if (intty) emit(c,14,i,"readonly snapshot laundered via integer/void cast");
-                else if (star&&typ&&!cst) emit(c,13,i,"casting away const on readonly snapshot"); }
+                int ptr_cast = (star && typ && !cst);   /* strips const on a pointer */
+                int int_cast = intty;                   /* integer/void launder     */
+                if (ptr_cast || int_cast) {
+                    /* unwrap the operand expression following the cast */
+                    size_t p=close+1; int prefixptr=0;
+                    while (p<f->body_end &&
+                           (tok_is(T(c,p),"&")||tok_is(T(c,p),"*")||tok_is(T(c,p),"("))) {
+                        if (tok_is(T(c,p),"&")||tok_is(T(c,p),"*")) prefixptr=1;
+                        p++;
+                    }
+                    if (p<f->body_end && T(c,p)->kind==HCT_IDENT && is_ro_param(f,T(c,p)->text)) {
+                        const hc_token *after = (p+1<f->body_end)?T(c,p+1):NULL;
+                        int member = after && (tok_is(after,"->")||tok_is(after,"."));
+                        /* a bare member VALUE read (no address-of / deref prefix) is not a ptr use */
+                        if (prefixptr || !member) {
+                            if (ptr_cast) emit(c,13,i,"casting away const on readonly snapshot");
+                            else          emit(c,14,i,"readonly snapshot laundered via integer/void cast");
+                        }
+                    }
+                }
+            }
         }
 
         /* E014 union pun: use of a launder union / typedef name */
@@ -822,6 +1041,46 @@ static void raw_pass(ctx *c, const char *raw)
     if (rc(scan,"<dlfcn.h>")) emit(c,24,firsttok,"banned include <dlfcn.h>");
     if (rc(scan,"<omp.h>")) emit(c,6,firsttok,"banned include <omp.h>");
 
+    /* V1 + OpenMP: scan raw directive lines. The raw user source must NEVER
+       contain a GNU linemarker (`# <n> "file" [flags]`) — gcc -E would honour a
+       hand-written one and stamp the rest of the TU as system-header flag 3,
+       slipping past provenance filtering. Also reject `#line` in component and
+       `#pragma omp` (pulls in the GOMP lock runtime). */
+    {
+        int comp = (c->profile == HC_PROFILE_COMPONENT);
+        const char *p = scan; int lm_done = 0;
+        while (p && *p) {
+            const char *q = p;
+            while (*q==' '||*q=='\t') q++;
+            if (*q=='#') {
+                const char *d = q+1;
+                while (*d==' '||*d=='\t') d++;
+                if (!lm_done && isdigit((unsigned char)*d)) {
+                    emit(c,25,firsttok,"hand-written GNU linemarker forges source provenance (system-header flag)");
+                    lm_done = 1;
+                } else if (comp && !strncmp(d,"line",4) &&
+                           (d[4]==' '||d[4]=='\t'||d[4]=='\0'||d[4]=='\n')) {
+                    emit(c,25,firsttok,"#line provenance override not permitted in component profile");
+                } else if (!strncmp(d,"line",4)) {
+                    /* runtime: reject #line pointing at a system path */
+                    const char *nl=strchr(d,'\n'); const char *dq=strchr(d,'"');
+                    if (dq && (!nl||dq<nl)) {
+                        const char *sys1=strstr(dq,"/usr/"), *sys2=strstr(dq,"<");
+                        if ((sys1 && (!nl||sys1<nl))||(sys2 && (!nl||sys2<nl)))
+                            emit(c,25,firsttok,"#line points at a system path (forged provenance)");
+                    }
+                } else if (!strncmp(d,"pragma",6)) {
+                    const char *w=d+6;
+                    while (*w==' '||*w=='\t') w++;
+                    if (!strncmp(w,"omp",3) &&
+                        (w[3]==' '||w[3]=='\t'||w[3]=='\n'||w[3]=='\0'||w[3]=='\r'))
+                        emit(c,1,firsttok,"#pragma omp introduces a hidden GOMP lock runtime");
+                }
+            }
+            { const char *nl=strchr(p,'\n'); if(!nl) break; p=nl+1; }
+        }
+    }
+
     /* E025: ## token paste smuggling a banned symbol not present in raw text */
     if (rc(scan,"##")) {
         size_t i;
@@ -939,6 +1198,7 @@ int hc_verify(hc_unit *u, const hc_token_list *tl,
         if (leak) check_callgraph(&c, f, leak);
     }
     check_recursion(&c);
+    check_toplevel_asm(&c);
     raw_pass(&c, rawsrc);
 
     free(leak);

@@ -11,9 +11,12 @@ translation unit (`-x cpp-output` on the annotation-stripped `.i`), so the
 bytes HC analyzes and the bytes gcc codegens are provably the same — there is
 no preprocessor/backend split-brain.
 
-Zero mutexes. Zero locks. Zero ambient nondeterminism. The golden HandshakeOS
-ledger hash `5f44cefa72e8ac19` reproduces bit-for-bit through HC on x86_64 and
-ARM64.
+Zero mutexes, zero locks, zero ambient nondeterminism — enforced across every
+compiled user and HandshakeOS translation unit and the dynamically-linked
+binaries HC audits. (A fully `-static` ARM64 executable additionally pulls in
+glibc's internal `libc.a` lock routines; see the honest-scope section below.)
+The golden HandshakeOS ledger hash `5f44cefa72e8ac19` reproduces bit-for-bit
+through HC on x86_64 and ARM64.
 
 ## Build
 
@@ -71,16 +74,27 @@ in `include/hc_backend.h` is where a native emitter lands in v0.2+). Concretely:
   the user's exact macro/opt/std flags mirrored in). There are no hardcoded
   filenames, so unseen cheaters are caught by the same rules.
 - **Codegen is gcc.** For a plain annotated `.c` that passes verification, the
-  emitted object is **byte-identical to what `gcc` would produce** from the same
-  flags — the HS_* annotations strip to nothing (or `restrict`) and HC does not
-  (yet) rewrite instructions. The value HC adds at this stage is the *gate* and
-  the deterministic `.hc` lowering, not a different instruction stream.
+  emitted object is **byte-identical to what `gcc` would produce without `-g`**
+  from the same flags — the HS_* annotations strip to nothing (or `restrict`)
+  and HC does not (yet) rewrite instructions. (With `-g`, the machine code still
+  matches; only the DWARF line/column tables differ, since they reflect the
+  verified preprocessed stream HC actually compiles.) The value HC adds at this
+  stage is the *gate* and the deterministic `.hc` lowering, not a different
+  instruction stream.
 - **"Zero mutexes" is a property of the compiled translation units** HC emits
-  and audits (0 lock/spin/sem/cond symbols across all HandshakeOS objects).
-  Note that a fully static ARM64 link (`-static`) pulls in glibc's `libc.a`,
-  which itself contains lock symbols; that is a property of the C library, not
-  of HC-compiled code. HC audits the objects it compiles, and fails closed on a
-  stripped/static binary it cannot prove (no symbol table).
+  and audits (0 lock/spin/sem/cond symbols across all 28 HandshakeOS objects on
+  both arches). Note that a fully static ARM64 link (`-static`) pulls glibc's
+  internal `libc.a` lock routines into the image. Such a `-static` binary *does*
+  carry a symbol table, and it **fails** the audit precisely because those glibc
+  lock symbols are then present — that is a property of the C library, not of
+  HC-compiled code. (Separately, HC also fails closed on a *stripped* binary
+  that has no symbol table at all, since absence of symbols cannot prove
+  zero-lock.)
+- **HandshakeOS does not `#include "hc_rt.h"` yet.** The golden kernel is
+  compiled and audited *as-is* by HC; `runtime/hc_rt.h`'s acquire/release,
+  bounded-wait and bitpack primitives are staged for the optimization-integration
+  pass that lands after live H700 FEL validation, not wired into the kernel
+  today.
 
 ## `hc_rt.h` runtime note (EVTSTREAM dependency)
 
