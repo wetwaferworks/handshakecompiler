@@ -407,11 +407,30 @@ static void check_toplevel_asm(ctx *c)
           for (z=0; z<c->u->nfuncs; z++)
               if (i>c->u->funcs[z].body_start && i<c->u->funcs[z].body_end) { inbody=1; break; }
           if (inbody) continue; }          /* handled by check_asm */
-        /* statement form only (file-scope asm declaration): prev token is a
-           declaration boundary. Declarator symbol-redirect is left to E026. */
-        { int stmt_form = (i==0);
-          if (!stmt_form) { const hc_token *pv=T(c,i-1); if (tok_is(pv,";")||tok_is(pv,"}")) stmt_form=1; }
-          if (!stmt_form) continue; }
+        /* Determine statement vs declarator-redirect form. Walk backwards past any
+           __extension__ tokens (C GNU qualifier) before testing the declaration
+           boundary, so __extension__ __asm__(...) (and chains of them) is still
+           seen as a file-scope asm statement. */
+        int stmt_form;
+        { size_t b = i; int found = 0;
+          while (b > 0) {
+              const hc_token *pv = T(c, b-1);
+              if (ieq(pv->text, "__extension__")) { b--; continue; }
+              if (tok_is(pv,";")||tok_is(pv,"}")) found = 1;
+              break;
+          }
+          stmt_form = (b == 0) || found; }
+        /* COMPONENT: no file-scope inline asm of ANY form is permitted — neither a
+           statement-form block nor a declarator asm-label redirect (which could
+           alias a banned symbol). System-header asm labels (t->system) and the
+           runtime header are already skipped above, so glibc stays clean. */
+        if (!runtime) {
+            emit(c,4,i,"file-scope inline asm not permitted in component (route via hc_rt.h)");
+            continue;
+        }
+        /* RUNTIME: only statement-form asm is content-checked below; a declarator
+           symbol-redirect is left to E026 / raw_pass. */
+        if (!stmt_form) continue;
         size_t j = i + 1;
         while (j < c->tl->count && (tok_is(T(c,j),"volatile")||ieq(T(c,j)->text,"__volatile__")||
                ieq(T(c,j)->text,"goto"))) j++;
@@ -426,10 +445,6 @@ static void check_toplevel_asm(ctx *c)
         }
         acc[ai] = '\0';
         lc_strip(acc);
-        if (!runtime) {
-            emit(c,4,i,"top-level file-scope inline asm not permitted in component (route via hc_rt.h)");
-            continue;
-        }
         /* RUNTIME: even the audited core may not emit constructors, raw opcodes,
            syscalls, cycle counters or lock/spin primitives from top-level asm. */
         int ctor = (strstr(acc,".init_array")||strstr(acc,".preinit_array")||strstr(acc,".fini_array")||
@@ -710,24 +725,79 @@ static void check_strict_mem(ctx *c, hc_func *f)
             if (v && !v->is_const) emit(c,8,i,"address of shared/file-scope var taken in PULL/BARRIER (writable alias)");
         }
 
-        /* E008: capturing a writable pointer alias of a MUTABLE shared global.
-           Covers mutable global array decay (`uint64_t *p = g_table;`) and a
-           const-POINTER-to-mutable (`uint64_t *q = g_const_ptr;` where the
-           global is `T * const`). `static const` LUTs (const pointee) are NOT
-           flagged, so read-only tables stay accepted. */
+        /* E008: a MUTABLE file-scope array (decays to a writable T*) or non-const
+           file-scope pointer that escapes as a writable pointer inside a PULL/
+           BARRIER kernel — via a call argument, pointer arithmetic, a pointer
+           cast, or an assignment RHS. Covers:
+             memmove(shared_buf, ...)      (call argument)
+             memmove(shared_buf + 4, ...)  (pointer arithmetic)
+             memcpy((void*)shared_buf,...) (cast operand)
+             foo(shared_buf)               (call argument)
+             uint8_t *p = shared_buf + 1;  (arithmetic into a pointer)
+             p = (uint8_t*)shared_buf;     (cast assignment)
+             uint8_t *p = shared_buf;      (bare assignment RHS)
+           NOT flagged (zero false positives):
+             - const arrays / const T* LUTs (gv->is_const_pointee)
+             - read indexing shared_buf[i]  (element read; element writes and
+               &shared_buf[i] are caught by the direct-write / &g rules above)
+             - sizeof / _Alignof operand
+             - value comparisons / plain reads of the pointer value          */
         if (t->kind==HCT_IDENT) {
             hc_var *gv = hc_find_var(c->u, t->text);
-            if (gv && (gv->is_array || gv->is_pointer) && !gv->is_const_pointee &&
-                i>f->body_start+1 && tok_is(T(c,i-1),"=") &&
-                i+1<f->body_end && tok_is(T(c,i+1),";")) {
-                /* require the LHS of this initializer/assignment to be a pointer */
-                size_t s=i-1; int star=0;
-                while (s>f->body_start && !tok_is(T(c,s),";") &&
-                       !tok_is(T(c,s),"{") && !tok_is(T(c,s),"}")) {
-                    if (tok_is(T(c,s),"*")) star=1;
-                    s--;
+            if (gv && !gv->is_const_pointee && (gv->is_array || gv->is_pointer)) {
+                const hc_token *prev = (i>f->body_start+1) ? T(c,i-1) : NULL;
+                const hc_token *next = (i+1<f->body_end)   ? T(c,i+1) : NULL;
+                int is_index  = next && tok_is(next,"[");                 /* element access */
+                int is_addr   = prev && tok_is(prev,"&");                 /* &g rule above  */
+                int is_member = next && (tok_is(next,".")||tok_is(next,"->"));
+                int is_sizeof = prev && (ieq(prev->text,"sizeof")||ieq(prev->text,"_Alignof"));
+                if (!is_sizeof && prev && tok_is(prev,"(") && i>f->body_start+2) {
+                    const hc_token *pp=T(c,i-2);
+                    if (ieq(pp->text,"sizeof")||ieq(pp->text,"_Alignof")) is_sizeof=1;
                 }
-                if (star) emit(c,8,i,"writable pointer alias of mutable shared global in PULL/BARRIER");
+                if (!is_index && !is_addr && !is_member && !is_sizeof && prev) {
+                    int decays = 0;
+                    /* pointer arithmetic: G +/- expr */
+                    if (next && (tok_is(next,"+")||tok_is(next,"-"))) decays = 1;
+                    /* assignment RHS: ... = G */
+                    if (tok_is(prev,"=")) decays = 1;
+                    /* call argument (2nd+): , G */
+                    if (tok_is(prev,",")) decays = 1;
+                    /* call argument (1st): name ( G  -- '(' preceded by a call name */
+                    if (tok_is(prev,"(") && i>f->body_start+2) {
+                        const hc_token *pp=T(c,i-2);
+                        if (pp->kind==HCT_IDENT &&
+                            !ieq(pp->text,"if")&&!ieq(pp->text,"while")&&!ieq(pp->text,"for")&&
+                            !ieq(pp->text,"switch")&&!ieq(pp->text,"return")&&!ieq(pp->text,"sizeof")&&
+                            !ieq(pp->text,"_Alignof"))
+                            decays = 1;
+                    }
+                    /* cast operand: ( type * ) G  -- prev ')' closing a pointer cast */
+                    if (tok_is(prev,")")) {
+                        int d=0; size_t k=i-1, open=0;
+                        for (;;) {
+                            if (tok_is(T(c,k),")")) {
+                                d++;
+                            } else if (tok_is(T(c,k),"(")) {
+                                d--;
+                                if (d==0) { open=k; break; }
+                            }
+                            if (k==f->body_start) break;
+                            k--;
+                        }
+                        if (open) {
+                            int star=0,typ=0; size_t z;
+                            for (z=open+1; z<i-1; z++) {
+                                const hc_token *zt=T(c,z);
+                                if (tok_is(zt,"*")) star=1;
+                                if (zt->kind==HCT_IDENT) typ=1;
+                            }
+                            if (star&&typ) decays = 1;
+                        }
+                    }
+                    if (decays)
+                        emit(c,8,i,"mutable shared array/pointer decays to a writable pointer in PULL/BARRIER");
+                }
             }
         }
 
@@ -998,6 +1068,28 @@ static void collect_globals(ctx *c)
 }
 
 /* ---------- comment-stripped raw copy (preserve strings) ---------- */
+/* C11 translation phase 2: physically splice backslash-newline continuations
+   (\<LF> and \<CR><LF>) so a directive or keyword broken across lines with a
+   trailing backslash is normalized to one logical line BEFORE comment stripping
+   and the directive scan. This mirrors what gcc -E does, closing the
+   `#\<LF> 1 "/usr/include/..." 3` system-linemarker spoof (V1b). */
+static char *splice_continuations_dup(const char *raw)
+{
+    size_t n = strlen(raw), i;
+    char *o = (char *)malloc(n + 1);
+    size_t oi = 0;
+    if (!o) return NULL;
+    for (i = 0; i < n; i++) {
+        if (raw[i] == '\\') {
+            if (raw[i+1] == '\n') { i += 1; continue; }                  /* \<LF>      */
+            if (raw[i+1] == '\r' && raw[i+2] == '\n') { i += 2; continue; } /* \<CR><LF> */
+        }
+        o[oi++] = raw[i];
+    }
+    o[oi] = '\0';
+    return o;
+}
+
 static char *strip_comments_dup(const char *raw)
 {
     size_t n = strlen(raw), i;
@@ -1026,8 +1118,10 @@ static int rc(const char *hay, const char *n){ return strstr(hay,n)!=NULL; }
 static void raw_pass(ctx *c, const char *raw)
 {
     if (raw == NULL) return;
-    char *s = strip_comments_dup(raw);
-    const char *scan = s ? s : raw;
+    char *spliced = splice_continuations_dup(raw);   /* phase 2 line splicing */
+    const char *base = spliced ? spliced : raw;
+    char *s = strip_comments_dup(base);
+    const char *scan = s ? s : base;
     size_t firsttok = 0, z;
     for (z=0; z<c->tl->count; z++){ if(!c->tl->toks[z].system){ firsttok=z; break; } }
 
@@ -1145,6 +1239,7 @@ static void raw_pass(ctx *c, const char *raw)
         }
     }
     free(s);
+    free(spliced);
 }
 
 int hc_verify(hc_unit *u, const hc_token_list *tl,

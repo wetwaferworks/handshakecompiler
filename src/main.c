@@ -19,7 +19,7 @@
 
 int hc_lower_hc(const char *src, FILE *out);
 
-#define HC_VERSION "0.1.2"
+#define HC_VERSION "0.1.3"
 #define MAXARG 512
 
 static int ends_with(const char *s, const char *suf)
