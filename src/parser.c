@@ -133,10 +133,28 @@ int hc_parse_unit(const hc_token_list *tl, hc_unit *u)
     while (i < tl->count && t[i].kind != HCT_EOF) {
         if (t[i].system) { i++; continue; }
 
+        /* skip __attribute__((...)) and __asm__(...) groups entirely */
+        if (t[i].kind == HCT_IDENT &&
+            (strcmp(t[i].text,"__attribute__")==0 || strcmp(t[i].text,"__asm__")==0 ||
+             strcmp(t[i].text,"__asm")==0 || strcmp(t[i].text,"asm")==0)) {
+            size_t j = i + 1;
+            while (j < tl->count && !(t[j].kind==HCT_PUNCT && strcmp(t[j].text,"(")==0) &&
+                   !(t[j].kind==HCT_PUNCT && strcmp(t[j].text,";")==0)) j++;
+            if (j < tl->count && t[j].kind==HCT_PUNCT && strcmp(t[j].text,"(")==0) {
+                i = match(tl, j, "(", ")") + 1;
+            } else { i = j; }
+            continue;
+        }
+
         if (t[i].kind == HCT_PUNCT && strcmp(t[i].text, "{") == 0 && depth == 0) {
-            /* a brace at depth 0 that is not a function body (e.g. init list) */
+            /* a brace at depth 0 that is not a function body: an aggregate-type
+             * body (struct/enum/union def) or a stray init list. Consume the
+             * whole definition including a trailing ';' so its members are not
+             * mistaken for file-scope declarators. */
             size_t close = match(tl, i, "{", "}");
             i = close + 1;
+            if (i < tl->count && t[i].kind == HCT_PUNCT && strcmp(t[i].text, ";") == 0) i++;
+            stmt_start = i;
             continue;
         }
 

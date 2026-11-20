@@ -237,8 +237,8 @@ int hc_lex_preprocessed(const char *buf, size_t len, hc_token_list *out)
         }
     }
     push(out, HCT_EOF, "", 0, line, col, system, curfile);
-    /* file name table intentionally leaked into token->file pointers; freed at exit. */
-    free(ftab);
+    out->files = ftab;      /* list now owns the interned file names */
+    out->nfiles = fn;
     return 0;
 }
 
@@ -250,8 +250,11 @@ void hc_tokens_free(hc_token_list *tl)
         free(tl->toks[i].text);
     }
     free(tl->toks);
+    for (i = 0; i < tl->nfiles; i++) free(tl->files[i]);
+    free(tl->files);
     tl->toks = NULL;
-    tl->count = tl->cap = 0;
+    tl->files = NULL;
+    tl->count = tl->cap = tl->nfiles = 0;
 }
 
 size_t hc_decode_string_literal(const char *lexeme, char *dst, size_t cap)

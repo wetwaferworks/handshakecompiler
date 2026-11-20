@@ -176,7 +176,7 @@ static void check_idents(ctx *c, hc_func *f)
         /* E023 order leak */
         if (ieq(s,"pthread_self")||ieq(s,"gettid")||ieq(s,"sched_getcpu"))
             { emit(c,23,i,"thread-identity leak into deterministic code"); continue; }
-        if ((ieq(s,"atomic_fetch_add")||ieq(s,"atomic_fetch_add_explicit")) && S)
+        if ((ieq(s,"atomic_fetch_add")||ieq(s,"atomic_fetch_add_explicit")||ieq(s,"__atomic_fetch_add")||ieq(s,"__c11_atomic_fetch_add")) && S)
             { emit(c,23,i,"arrival-order atomic fold in PULL/BARRIER"); continue; }
         /* E010 */
         if (ieq(s,"hs_hs_post_event") && S) { emit(c,10,i,"posting control events from PULL/BARRIER"); continue; }
@@ -268,8 +268,7 @@ static void check_loops(ctx *c, hc_func *f)
             for (k=i+2;k<cp;k++) {
                 const hc_token *ct = T(c,k);
                 if (ct->kind==HCT_IDENT) {
-                    if (ispfx(ct->text,"atomic_compare_exchange")||ieq(ct->text,"atomic_exchange")||
-                        ieq(ct->text,"atomic_exchange_explicit")) cas=1;
+                    if (ispfx(ct->text,"atomic_compare_exchange")||ispfx(ct->text,"__atomic_compare_exchange")||ispfx(ct->text,"__c11_atomic_compare_exchange")||ieq(ct->text,"atomic_exchange")||ieq(ct->text,"atomic_exchange_explicit")||ieq(ct->text,"__atomic_exchange")) cas=1;
                     if (is_vol(c, ct->text)) vol=1;
                 }
             }

@@ -26,6 +26,8 @@ typedef struct {
     hc_token *toks;
     size_t    count;
     size_t    cap;
+    char    **files;   /* interned file names owned by the list */
+    size_t    nfiles;
 } hc_token_list;
 
 /*
