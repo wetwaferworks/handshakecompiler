@@ -204,6 +204,36 @@ static int writes_global(ctx *c, hc_func *f)
     return 0;
 }
 
+static int is_param(hc_func *f, const char *name);   /* defined with check_strict_mem */
+
+/* Keywords that can legally precede an identifier WITHOUT the identifier being a
+   declarator name (so `return system;` is not mistaken for a declaration). */
+static int tok_is_value_kw(const char *s){
+    return ieq(s,"return")||ieq(s,"sizeof")||ieq(s,"_Alignof")||ieq(s,"case")||
+           ieq(s,"goto")||ieq(s,"else")||ieq(s,"do")||ieq(s,"typedef")||
+           ieq(s,"if")||ieq(s,"while")||ieq(s,"for")||ieq(s,"switch")||ieq(s,"default");
+}
+/* Does this function body declare a variable / parameter named `name` (an object,
+   not a function call)? A declaration is a non-value-keyword identifier (a type or
+   typedef) or a pointer/qualifier token, immediately followed by `name`, then a
+   declarator terminator. Distinguishes `int system = 1;` (object) from
+   `fp = system;` (function-pointer capture, prev is `=`). */
+static int local_decl_named(ctx *c, hc_func *f, const char *name){
+    size_t k;
+    for (k = f->body_start + 2; k + 1 < f->body_end; k++){
+        const hc_token *t = T(c,k);
+        if (t->kind != HCT_IDENT || !ieq(t->text, name)) continue;
+        const hc_token *pv = T(c,k-1);
+        const hc_token *nx = T(c,k+1);
+        int decl_prev = tok_is(pv,"*") ||
+                        (pv->kind==HCT_IDENT && !tok_is_value_kw(pv->text));
+        int decl_next = tok_is(nx,";")||tok_is(nx,"=")||tok_is(nx,",")||
+                        tok_is(nx,"[")||tok_is(nx,")");
+        if (decl_prev && decl_next) return 1;
+    }
+    return 0;
+}
+
 /* ---------- TU-wide bans (every function) ---------- */
 static void check_bans(ctx *c, hc_func *f)
 {
@@ -219,6 +249,29 @@ static void check_bans(ctx *c, hc_func *f)
         const hc_token *t = T(c, i);
         if (t->kind != HCT_IDENT) continue;
         const char *s = t->text;
+
+        /* A struct/union member access (emu->system, cpu->clock, rtc->alarm,
+           apu->time, io->poll) is NEVER a libc function reference, so the
+           OS-facility bans below must not fire on it. The hs_hs internal-field
+           (E009) and watchdog (E019) checks DO target members, so handle them
+           here, then skip the libc-name matching for the member. */
+        if (i > f->body_start+1 && (tok_is(T(c,i-1),"->")||tok_is(T(c,i-1),"."))) {
+            if ((ieq(s,"pub_seq")||ieq(s,"pub_phase")||ieq(s,"pub_cycle")||ieq(s,"pub_group")||
+                 ieq(s,"pub_logical_seq")||ieq(s,"pub_generation")||ieq(s,"ledger_hash")||
+                 ieq(s,"arrivals")||ieq(s,"expected")||ieq(s,"commit_epoch")||
+                 ieq(s,"publish_word")||ieq(s,"barrier_word")||ieq(s,"monatomic")) && (S||CM))
+                emit(c,9,i,"direct access to hs_hs internal/unpublished field");
+            else if ((ieq(s,"ceiling_ns")||ieq(s,"frozen")) && (S||CM))
+                emit(c,19,i,"watchdog tamper (ceiling_ns/frozen)");
+            continue;
+        }
+        /* A parameter, or a local variable named like a libc function
+           (`int system;`, `int alarm;`), is the user's own object — not the call.
+           Function-pointer capture (`fp = system`) has prev `=` (not a declarator)
+           and a call/address-of (`system(...)`, `(system)(...)`, `&system`) is
+           still caught by the bans below. */
+        if (is_param(f,s)) continue;
+        if ((ieq(s,"system")||ieq(s,"alarm")) && local_decl_named(c,f,s)) continue;
 
         /* E001 POSIX locks + SysV semaphores */
         if (ispfx(s,"pthread_mutex")||ispfx(s,"pthread_rwlock")||ispfx(s,"pthread_cond")||
@@ -325,18 +378,6 @@ static void check_bans(ctx *c, hc_func *f)
         if ((ieq(s,"atomic_fetch_add")||ieq(s,"atomic_fetch_add_explicit")||ieq(s,"__atomic_fetch_add")||
              ieq(s,"__c11_atomic_fetch_add")) && S)
             { emit(c,23,i,"arrival-order atomic fold in PULL/BARRIER"); continue; }
-        /* E009/E019 hs internals + watchdog (member access, strict/commit) */
-        if (i > f->body_start+1) {
-            const hc_token *pv = T(c,i-1);
-            if ((tok_is(pv,"->")||tok_is(pv,".")) &&
-                (ieq(s,"pub_seq")||ieq(s,"pub_phase")||ieq(s,"pub_cycle")||ieq(s,"pub_group")||
-                 ieq(s,"pub_logical_seq")||ieq(s,"pub_generation")||ieq(s,"ledger_hash")||
-                 ieq(s,"arrivals")||ieq(s,"expected")||ieq(s,"commit_epoch")||
-                 ieq(s,"publish_word")||ieq(s,"barrier_word")||ieq(s,"monatomic")) && (S||CM))
-                { emit(c,9,i,"direct access to hs_hs internal/unpublished field"); continue; }
-            if ((tok_is(pv,"->")||tok_is(pv,".")) && (ieq(s,"ceiling_ns")||ieq(s,"frozen")) && (S||CM))
-                { emit(c,19,i,"watchdog tamper (ceiling_ns/frozen)"); continue; }
-        }
     }
 }
 
