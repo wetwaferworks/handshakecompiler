@@ -12,7 +12,10 @@
 - **CloudAtlas · Technical Art Director**: art (boot art, the animated o.O splash pack, squad ASCII)
 - **SpaceXAI**: makers of Grok Bot and the squad
 
-> **Zero mutex, with one exception.** Everything in the Handshake stack ships with zero mutexes: PID 1, the emulator cores, the runtime and the USB modules. The N64 core objects have 0 lock symbols. The v5.5 image has one exception: two N64 diagnostic tools, `bench_n64` and `hs_pf_probe`, are statically linked against glibc and carry its internal pthread mutex code. v5.6 removes the exception by relinking them against `hs_rt`, HandshakeOS's own lock-free runtime.
+> **Zero mutex in userspace.** The idea and the shape are JD's; the assistants co-implemented. From v5.6 on, the shipped userspace and PID 1 runtime are zero-mutex: PID 1 (`handshake-init`), the emulator cores (the N64 core objects included), the `hs_rt` runtime, the USB modules, and the N64 diagnostic tools `bench_n64` and `hs_pf_probe` (relinked against `hs_rt`) all scan clean, with 0 lock symbols. Evidence is in handshake-builds: `v5/v5.6/image-scan.txt`, `v5/v5.7/image-scan.txt`, and `v5/v5.8/image-scan.txt` each end in `IMAGE_ZERO_MUTEX_CLEAN` (`bench_n64` and `hs_pf_probe` CLEAN). The v5.9.1 run is `v5/v5.9.1/image-scan.txt`, `v5/v5.9.1/nm-locks.txt`, and `v5/v5.9.1/scan-run.txt` (`IMAGE_ZERO_MUTEX_CLEAN`, `NM_SUMMARY objects=186 lock_dirty=0`).
+>
+> The kernel underneath is mainline Linux 7.3.5 + ROCKNIX, which still has its own kernel mutexes (static count 1,599 mutex call sites; kernel work is next week). v5.8 and later ship kernel `7.3.5-hs-v58` on that base.
+
 
 ---
 
@@ -46,6 +49,8 @@ The full table is in [`docs/RULES.md`](docs/RULES.md), and `hc --dump-rules` pri
 There are two profiles:
 - `--profile=component` (default) applies all 26 rules to every component, emulator, game and phase handler.
 - `--profile=runtime` / `--allow-runtime` is for the audited handshake core only. It still bans every lock, but narrowly allows `pthread_create`/`pthread_join`, `FUTEX_WAIT/WAKE_PRIVATE`, and `clock_gettime(CLOCK_MONOTONIC)` for telemetry.
+
+This tree also keeps Herominde's round-2 red-team corpus under `tests/redteam-v01/` (the injected-header helper is `r25_injected_spoof.h`) and Mr Data's Layer-2 evaluation reports under `docs/eval/`.
 
 ## Build
 
@@ -87,7 +92,7 @@ No rule matches hardcoded file names, so the same rules also catch cheats nobody
 
 - **The gate is real.** All 26 rules are real analysis over the one preprocessed translation unit.
 - **Code generation is still gcc.** For a plain `.c` that passes, the object is byte-identical to what gcc would produce from the same flags without `-g`. HC's value today is the gate and the deterministic `.hc` lowering. A native code generator plugs into `hc_backend_ops` in v0.2+.
-- **Static glibc brings its own locks.** A fully `-static` link against glibc pulls in glibc's internal lock routines, and HC's audit correctly **fails** those binaries. That is why HandshakeOS links its shipped binaries against its own runtime, `hs_rt`, instead of glibc. In the v5.5 image this is the one remaining exception: two N64 diagnostic tools (`bench_n64`, `hs_pf_probe`) are still static-glibc. v5.6 relinks them against `hs_rt`.
+- **Static glibc brings its own locks.** A fully `-static` link against glibc pulls in glibc's internal lock routines, and HC's audit correctly **fails** those binaries. That is why HandshakeOS links its shipped binaries against its own runtime, `hs_rt`, instead of glibc. From v5.6 on, HandshakeOS relinks `bench_n64` and `hs_pf_probe` against `hs_rt` as well, and those tools scan CLEAN in the shipped images. The v5.5 image still used the old static-glibc link.
 - **`hc_rt.h` is staged.** Its acquire/release, bounded-wait (ARM64 `WFE`, bounded by `max_spins`, never a spinlock) and bit-packing primitives are ready but not yet wired into the HandshakeOS kernel.
 
 ## Where HC is used

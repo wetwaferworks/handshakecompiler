@@ -1,0 +1,36 @@
+path	severity	expected_code	mode	description
+escapes/r01_ifndef_hc_compiler_splitbrain.c	P0	HC-E003	c_default	#ifndef __HC_COMPILER__ hides real atomic_flag spinlock from verifier while backend compiles it into .o
+escapes/r02_unannotated_worker_spinlock_rdtsc.c	P0	HC-E003/E021	c_default	Unannotated hs_hs_work_fn callback (no HS_PHASE_* macro) embeds atomic_flag spinlock + rdtsc + global write
+escapes/r03_constructor_hidden_lock.c	P0	HC-E003/E004	c_default	__attribute__((constructor)) runs inline-asm lock xchg outside any phase function
+escapes/r04_asm_adjacent_string_concat_rdtsc.c	P0	HC-E021	c_default	Inline asm adjacent string literal concat ("" "rdtsc") evades first-string-only check_asm()
+escapes/r05_asm_adjacent_string_concat_lock.c	P0	HC-E004	c_default	Inline asm adjacent string literal concat ("lo" "ck xchgl...") evades check_asm() spinlock ban
+escapes/r06_asm_raw_byte_rdtsc_pause.c	P0	HC-E021/E004	c_default	Inline asm raw machine-code .byte 0x0f,0x31 (rdtsc) + .byte 0xf3,0x90 (pause) evades mnemonic matching
+escapes/r07_for_loop_cas_spinlock.c	P1	HC-E003	c_default	CAS spinlock written with for(; !atomic_compare_exchange_weak(...); ) instead of while()
+escapes/r08_atomic_load_busywait_lock.c	P1	HC-E003/E016	c_default	Busy-wait lock using while(atomic_load_explicit(&g_busy, ...) != 0) (not volatile, not CAS)
+escapes/r09_struct_volatile_dekker_wait.c	P1	HC-E005	c_default	Volatile busy-wait flag nested inside a struct field evades depth-0 collect_globals() volatile tracking
+escapes/r10_unbounded_while2_and_for_noinc.c	P1	HC-E016	c_default	Unbounded while(2) and for(uint32_t i=0; i<1; ) (no increment) evade while(1)/for(;;) checks
+escapes/r11_fcntl_setlkw_and_sysv_sem.c	P1	HC-E002/E001	c_default	POSIX fcntl(F_SETLKW) file lock and SysV semop() semaphore evade both verify.c and elf_audit.c
+escapes/r12_static_local_mutable_in_pull.c	P1	HC-E008	c_default	Function-local static mutable variable inside HS_PHASE_PULL creates unsynchronized shared state
+escapes/r13_global_write_via_ptr_alias.c	P1	HC-E008	c_default	Writing HS_SHARED global in HS_PHASE_PULL via local pointer alias (uint64_t *p = &g_shared; *p = ...)
+escapes/r14_prefix_inc_global_in_pull.c	P1	HC-E008	c_default	Prefix ++g_shared directly inside HS_PHASE_PULL evades check_strict_mem() postfix-only check
+escapes/r15_const_cast_via_uintptr_roundtrip.c	P1	HC-E013/E014	c_default	Casting const HS_READONLY snapshot -> uintptr_t -> writable pointer evades direct (T *)ro_param check
+escapes/r16_typedef_anon_union_const_launder.c	P1	HC-E014	c_default	Anonymous typedef union { const T *ro; T *rw; } launder_t evades named 'union NAME' detector
+escapes/r17_cross_shard_write_add_mod.c	P1	HC-E015	c_default	Cross-shard overwrite using (my_shard + 1u) & 3u instead of ^ evades xor-only E015 detector
+escapes/r18_struct_fnptr_table_to_commit.c	P1	HC-E007/E011	c_default	File-scope const dispatch table holds HS_PHASE_COMMIT mutator; HS_PHASE_PULL invokes g_ops[0](phase)
+escapes/r19_indirect_fnptr_recursion.c	P1	HC-E017	c_default	Indirect self-recursion via function pointer evades direct callee dfs_cycle() check
+escapes/r20_blocking_read_and_dev_urandom.c	P1	HC-E018/E022	c_default	Blocking read()/fopen("/dev/urandom") inside HS_PHASE_PULL leaks kernel entropy and blocks barrier
+escapes/r21_ptr_address_order_and_getenv_pid.c	P1	HC-E023	c_default	ASLR pointer comparison (a < b), getpid(), and getenv() inside HS_PHASE_PULL break determinism
+escapes/r22_macro_paste_atomic_spin_and_rdtsc.c	P1	HC-E025	c_default	Preprocessor ## pasting sem_wait or getrandom or atomic_flag_test_and_set evades pthread-only E025
+escapes/r23_runtime_profile_clock_realtime.c	P1	HC-E020	c_runtime	--profile=runtime allows CLOCK_REALTIME in clock_gettime() and time() wall-clock
+escapes/r24_hc_unannotated_helper_spinlock.hc	P0	HC-E003/E008	hc_default	.hc file defines a static local mutable + inline-asm concat rdtsc inside phase pull
+escapes/r25_cli_wp_include_bypass.c	P0	CLI-BYPASS	cli_wp_include	Passing -Wp,-include,/tmp/spoof.h injects hidden lock into backend gcc while invisible to hc_preprocess()
+escapes/r26_cli_no_audit_asm_alias.c	P1	CLI-BYPASS	cli_no_audit	Using --no-audit + split string __asm__("\x70thread_" "mutex_lock") bypasses both raw_pass E026 and elf_audit
+valid_edge/ve01_doc_comment_mentions_dlfcn_and_mutex.c	ACCEPT	HC-OK	c_default	Valid zero-mutex C11 file whose doc comment mentions <dlfcn.h>, <threads.h>, and pthread_mutex_lock
+valid_edge/ve02_static_const_lookup_table_in_pull.c	ACCEPT	HC-OK	c_default	Valid HS_PHASE_PULL reading a static const lookup table (immutable)
+valid_edge/ve03_benign_identifier_substrings.c	ACCEPT	HC-OK	c_default	Valid C11 using benign names like mutex_free_ticks, sem_version, rand_seed_arg, time_step
+valid_edge/ve04_valid_xor_in_bounded_array_index.c	ACCEPT	HC-OK	c_default	Valid HS_PHASE_PULL writing to its OWN local stack buffer indexed with ^ (bit-reversal FFT/checksum)
+valid_edge/ve05_hc_comment_with_phase_and_shared_words.hc	ACCEPT	HC-OK	hc_default	Valid .hc file whose comments contain the English words 'phase pull', 'shared', and 'bounded(16)'
+valid_edge/ve06_hc_string_with_shared_word.hc	ACCEPT	HC-OK	hc_default	Valid .hc file with readonly const string containing 'shared' and 'phase' words
+escapes/r27_sysv_semop_and_fcntl_extern.c	P1	HC-E001/E002	c_default	SysV semop() and fcntl(F_SETLKW) without <sys/sem.h>/flock word evade verify.c and elf_audit.c
+escapes/r28_setjmp_longjmp_escape.c	P1	HC-E016/E018	c_default	setjmp()/longjmp() non-local control transfer inside HS_PHASE_PULL evades verify.c and elf_audit.c
+escapes/r29_cli_undef_hc_compiler.c	P0	CLI-BYPASS	cli_undef_hc	Passing -U__HC_COMPILER__ strips all HS_* annotations and lets Layer-1 c04_atomic_flag_spinlock escape
